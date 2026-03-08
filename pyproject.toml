@@ -1,0 +1,69 @@
+[tool.poetry]
+name = "mita-code"
+version = "0.1.0"
+description = "Local-first, terminal-native agentic coding assistant powered by Ollama"
+readme = "README.md"
+license = "Apache-2.0"
+authors = ["James Williams <james.williams@jtdub.com>"]
+packages = [{include = "mita", from = "src"}]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Typing :: Typed",
+]
+
+[tool.poetry.urls]
+Homepage = "https://github.com/jtdub/mita-code"
+Repository = "https://github.com/jtdub/mita-code"
+Issues = "https://github.com/jtdub/mita-code/issues"
+
+[tool.poetry.scripts]
+mita = "mita.cli:app"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+typer = ">=0.9.0"
+rich = ">=13.0.0"
+pydantic = ">=2.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0.0"
+pytest-asyncio = ">=0.23.0"
+ruff = ">=0.3.0"
+mypy = ">=1.8.0"
+pylint = ">=3.0.0"
+invoke = ">=2.0.0"
+isort = ">=5.12.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.isort]
+profile = "black"
+known_first_party = ["mita"]
+line_length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
