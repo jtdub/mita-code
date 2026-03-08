@@ -1,18 +1,24 @@
-"""Ollama server lifecycle management — start, stop, health check."""
+"""Ollama server lifecycle management — start, stop, health check.
+
+Runs Ollama as a detached daemon tracked via a PID file so it persists
+across short-lived CLI commands like ``mita models list``.
+"""
 
 from __future__ import annotations
 
-import atexit
+import os
 import shutil
+import signal
 import subprocess
 import time
+from pathlib import Path
 
 from rich.console import Console
 
 from mita.models.ollama_client import OllamaClient
 
-# Singleton tracking: did *we* start the server?
-_managed_process: subprocess.Popen[bytes] | None = None
+_PID_DIR = Path("~/.config/mita").expanduser()
+_PID_FILE = _PID_DIR / "ollama.pid"
 
 
 def find_ollama_binary() -> str | None:
@@ -26,19 +32,44 @@ def is_server_running(host: str = "http://localhost:11434", timeout: int = 5) ->
     return client.is_running()
 
 
+def _read_pid() -> int | None:
+    """Read the PID from the PID file, return None if missing or stale."""
+    try:
+        pid = int(_PID_FILE.read_text().strip())
+        # Check if process is alive
+        os.kill(pid, 0)
+        return pid
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError, OSError):
+        _remove_pid_file()
+        return None
+
+
+def _write_pid(pid: int) -> None:
+    """Write a PID to the PID file."""
+    _PID_DIR.mkdir(parents=True, exist_ok=True)
+    _PID_FILE.write_text(str(pid))
+
+
+def _remove_pid_file() -> None:
+    """Remove the PID file if it exists."""
+    try:
+        _PID_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def start_server(
     host: str = "http://localhost:11434",
     timeout: int = 30,
     console: Console | None = None,
 ) -> bool:
-    """Start the Ollama server in the background if not already running.
+    """Start the Ollama server as a detached daemon.
+
+    The server persists after Mita exits. Its PID is tracked in
+    ``~/.config/mita/ollama.pid`` so ``stop_server`` can find it later.
 
     Returns True if the server is running (either already was or we started it).
-    Returns False if we failed to start it.
     """
-    global _managed_process  # noqa: PLW0603
-
-    # Already running? Nothing to do.
     if is_server_running(host, timeout=5):
         return True
 
@@ -54,36 +85,32 @@ def start_server(
     if console:
         console.print("[dim]Starting Ollama server...[/dim]")
 
-    # Inherit full environment, override OLLAMA_HOST if non-default
-    import os
-
     env = os.environ.copy()
     env_host = host.replace("http://", "").replace("https://", "")
     env["OLLAMA_HOST"] = env_host
 
     try:
-        _managed_process = subprocess.Popen(
+        proc = subprocess.Popen(
             [binary, "serve"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=env,
+            start_new_session=True,
         )
     except OSError as e:
         if console:
             console.print(f"[red]Failed to start Ollama: {e}[/red]")
         return False
 
-    # Register cleanup so we stop it on exit
-    atexit.register(stop_server)
+    _write_pid(proc.pid)
 
     # Wait for the server to become healthy
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _managed_process.poll() is not None:
-            # Process exited unexpectedly
+        if proc.poll() is not None:
             if console:
                 console.print("[red]Ollama server exited unexpectedly.[/red]")
-            _managed_process = None
+            _remove_pid_file()
             return False
         if is_server_running(host, timeout=2):
             if console:
@@ -98,34 +125,44 @@ def start_server(
 
 
 def stop_server(console: Console | None = None) -> bool:
-    """Stop the Ollama server if we started it.
+    """Stop the Ollama server if it was started by Mita (tracked via PID file).
 
     Returns True if we stopped it, False if there was nothing to stop.
     """
-    global _managed_process  # noqa: PLW0603
-
-    if _managed_process is None:
+    pid = _read_pid()
+    if pid is None:
         return False
 
-    if _managed_process.poll() is None:
-        # Still running — terminate gracefully
-        _managed_process.terminate()
-        try:
-            _managed_process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            _managed_process.kill()
-            _managed_process.wait(timeout=5)
+    try:
+        os.kill(pid, signal.SIGTERM)
+        # Wait for graceful shutdown
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.25)
+            except ProcessLookupError:
+                break
+        else:
+            # Still alive after 10s — force kill
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    except ProcessLookupError:
+        pass  # Already dead
+
+    _remove_pid_file()
 
     if console:
         console.print("[dim]Ollama server stopped.[/dim]")
 
-    _managed_process = None
     return True
 
 
 def is_managed() -> bool:
-    """Return True if the current Ollama server was started by Mita."""
-    return _managed_process is not None and _managed_process.poll() is None
+    """Return True if a Mita-started Ollama server is tracked and alive."""
+    return _read_pid() is not None
 
 
 def ensure_server(
@@ -133,10 +170,7 @@ def ensure_server(
     auto_manage: bool = True,
     console: Console | None = None,
 ) -> bool:
-    """Ensure Ollama is available — start it if auto_manage is enabled.
-
-    This is the main entry point for the agent loop and CLI commands.
-    """
+    """Ensure Ollama is available — start it if auto_manage is enabled."""
     if is_server_running(host, timeout=5):
         return True
 
@@ -150,5 +184,3 @@ def ensure_server(
         return False
 
     return start_server(host=host, console=console)
-
-

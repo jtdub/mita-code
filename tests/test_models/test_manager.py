@@ -57,7 +57,11 @@ class TestListModels:
         output = capsys.readouterr().out
         assert "No models installed" in output
 
-    def test_ollama_not_running(self, _patch_client: MagicMock, capsys: CaptureFixture) -> None:
+    @patch("mita.models.manager.load_config")
+    def test_ollama_not_running(
+        self, mock_cfg: MagicMock, _patch_client: MagicMock, capsys: CaptureFixture
+    ) -> None:
+        mock_cfg.return_value.ollama.auto_manage = False
         _patch_client.is_running.return_value = False
         list_models()
         output = capsys.readouterr().out
@@ -79,9 +83,11 @@ class TestPullModel:
         output = capsys.readouterr().out
         assert "Failed to pull" in output
 
+    @patch("mita.models.manager.load_config")
     def test_pull_ollama_not_running(
-        self, _patch_client: MagicMock, capsys: CaptureFixture
+        self, mock_cfg: MagicMock, _patch_client: MagicMock, capsys: CaptureFixture
     ) -> None:
+        mock_cfg.return_value.ollama.auto_manage = False
         _patch_client.is_running.return_value = False
         pull_model("test-model")
         output = capsys.readouterr().out

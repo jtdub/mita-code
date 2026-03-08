@@ -321,9 +321,7 @@ def ollama_start() -> None:
         console.print("[green]Ollama is already running.[/green]")
         return
 
-    if start_server(host=cfg.ollama.host, console=console):
-        console.print("Server will stop when this process exits.")
-    else:
+    if not start_server(host=cfg.ollama.host, console=console):
         raise typer.Exit(1)
 
 
