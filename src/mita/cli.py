@@ -11,6 +11,15 @@ from rich.syntax import Syntax
 import mita
 from mita.config.loader import load_config
 from mita.memory.manager import add_memory, edit_memory, show_memory, show_memory_paths
+from mita.models.manager import (
+    list_models,
+    pull_model,
+    remove_model,
+    set_default_model,
+    show_hardware,
+    show_model_info,
+    show_recommendations,
+)
 
 console = Console()
 
@@ -125,6 +134,62 @@ def memory_add(
         add_memory(text, "project")
     else:
         add_memory(text, "project")
+
+
+# ── Models commands ───────────────────────────────────────────────
+
+models_app = typer.Typer(help="Model management.")
+app.add_typer(models_app, name="models")
+
+
+@models_app.command("list")
+def models_list() -> None:
+    """List installed Ollama models."""
+    list_models()
+
+
+@models_app.command("pull")
+def models_pull(
+    name: Annotated[str, typer.Argument(help="Model name to pull (e.g. qwen2.5-coder:7b).")],
+) -> None:
+    """Pull a model from the Ollama registry."""
+    pull_model(name)
+
+
+@models_app.command("remove")
+def models_remove(
+    name: Annotated[str, typer.Argument(help="Model name to remove.")],
+) -> None:
+    """Remove an installed model."""
+    remove_model(name)
+
+
+@models_app.command("recommend")
+def models_recommend() -> None:
+    """Recommend models for your hardware."""
+    show_recommendations()
+
+
+@models_app.command("info")
+def models_info(
+    name: Annotated[str, typer.Argument(help="Model name to show info for.")],
+) -> None:
+    """Show details about a model."""
+    show_model_info(name)
+
+
+@models_app.command("default")
+def models_default(
+    name: Annotated[str, typer.Argument(help="Model name to set as default.")],
+) -> None:
+    """Set the default model."""
+    set_default_model(name)
+
+
+@models_app.command("hardware")
+def models_hardware() -> None:
+    """Show detected hardware information."""
+    show_hardware()
 
 
 # ── Helpers ───────────────────────────────────────────────────────
