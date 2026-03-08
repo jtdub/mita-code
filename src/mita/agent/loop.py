@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from typing import Any
 
@@ -17,9 +18,9 @@ from mita.tools.schema import ToolCall
 from mita.ui.display import (
     display_error,
     display_markdown,
+    display_response_stats,
     display_streaming_end,
     display_streaming_token,
-    display_token_usage,
     display_tool_call,
     display_tool_result,
     prompt_user_confirm,
@@ -100,15 +101,33 @@ async def run_agent(
         messages = conversation.get_messages_for_api()
 
         if config.ui.stream:
-            assistant_text, tool_calls_raw = await _stream_response(
+            assistant_text, tool_calls_raw, stats = await _stream_response(
                 llm_client, messages, [], console
             )
+            if config.ui.show_token_count:
+                display_response_stats(
+                    console,
+                    prompt_tokens=stats.prompt_tokens,
+                    completion_tokens=stats.completion_tokens,
+                    total_time=stats.total_time,
+                    ttft=stats.ttft,
+                )
         else:
+            t0 = time.monotonic()
             with thinking_spinner(console):
                 response = await llm_client.chat(messages, tools=[])
+            elapsed = time.monotonic() - t0
             assistant_text, tool_calls_raw = _parse_response(response)
             if assistant_text:
                 display_markdown(console, assistant_text)
+            if config.ui.show_token_count:
+                usage = _extract_usage(response) or {}
+                display_response_stats(
+                    console,
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    total_time=elapsed,
+                )
 
         # Handle tool calls
         if tool_calls_raw:
@@ -131,11 +150,16 @@ async def run_agent(
             f"Reached maximum iterations ({MAX_ITERATIONS}). Stopping.",
         )
 
-    # Display token usage
-    if config.ui.show_token_count:
-        display_token_usage(console, conversation.total_tokens)
-
     return conversation
+
+
+class _ResponseStats:
+    """Token usage and timing stats from an LLM response."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_time: float = 0.0
+    ttft: float | None = None
 
 
 async def _stream_response(
@@ -143,15 +167,17 @@ async def _stream_response(
     messages: list[dict[str, Any]],
     tool_schemas: list[dict[str, Any]],
     console: Console,
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], _ResponseStats]:
     """Stream the LLM response, displaying tokens as they arrive.
 
     Returns:
-        Tuple of (text_content, tool_calls_raw).
+        Tuple of (text_content, tool_calls_raw, stats).
     """
     full_text = ""
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
     first_token = True
+    stats = _ResponseStats()
+    start_time = time.monotonic()
 
     # Show spinner while waiting for first token
     spinner_ctx = thinking_spinner(console)
@@ -160,6 +186,7 @@ async def _stream_response(
     async for chunk in client.stream_chat(messages, tools=tool_schemas):
         if first_token:
             spinner_ctx.__exit__(None, None, None)
+            stats.ttft = time.monotonic() - start_time
             first_token = False
 
         delta = _extract_delta(chunk)
@@ -170,16 +197,44 @@ async def _stream_response(
         # Accumulate tool call deltas
         _accumulate_tool_call_deltas(chunk, tool_calls_by_index)
 
+        # Extract usage from final chunk (LiteLLM includes it on the last chunk)
+        usage = _extract_usage(chunk)
+        if usage:
+            stats.prompt_tokens = usage.get("prompt_tokens", 0)
+            stats.completion_tokens = usage.get("completion_tokens", 0)
+
     # Clean up spinner if no chunks arrived at all
     if first_token:
         spinner_ctx.__exit__(None, None, None)
+
+    stats.total_time = time.monotonic() - start_time
 
     if full_text:
         display_streaming_end(console)
 
     # Convert accumulated tool calls to list
     tool_calls_raw = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
-    return full_text, tool_calls_raw
+    return full_text, tool_calls_raw, stats
+
+
+def _extract_usage(chunk: Any) -> dict[str, int] | None:
+    """Extract token usage from a streaming chunk (typically the last one)."""
+    try:
+        usage = getattr(chunk, "usage", None) or (
+            chunk.get("usage") if isinstance(chunk, dict) else None
+        )
+        if usage is None:
+            return None
+        if hasattr(usage, "prompt_tokens"):
+            return {
+                "prompt_tokens": usage.prompt_tokens or 0,
+                "completion_tokens": usage.completion_tokens or 0,
+            }
+        if isinstance(usage, dict) and "prompt_tokens" in usage:
+            return usage
+    except (AttributeError, KeyError):
+        pass
+    return None
 
 
 def _extract_delta(chunk: Any) -> str:
