@@ -13,6 +13,29 @@ class OllamaSettings(BaseModel):
     auto_manage: bool = True
 
 
+class OllamaRuntimeOptions(BaseModel):
+    """Ollama model runtime options passed via the API.
+
+    These map to Ollama's /api/chat 'options' field and let users
+    tune inference for their hardware.
+    """
+
+    num_gpu: int | None = None
+    num_thread: int | None = None
+    num_ctx: int | None = None
+    num_batch: int | None = None
+    use_mmap: bool | None = None
+    use_mlock: bool | None = None
+    num_keep: int | None = None
+    main_gpu: int | None = None
+    low_vram: bool | None = None
+    flash_attention: bool | None = None
+
+    def to_api_dict(self) -> dict[str, int | bool]:
+        """Return only non-None options for the Ollama API."""
+        return {k: v for k, v in self.model_dump().items() if v is not None}
+
+
 class ModelSettings(BaseModel):
     """LLM model settings."""
 
@@ -21,6 +44,7 @@ class ModelSettings(BaseModel):
     temperature: float = 0.1
     max_tokens: int = 4096
     context_window: int = 32768
+    ollama_options: OllamaRuntimeOptions = Field(default_factory=OllamaRuntimeOptions)
 
 
 class ToolSettings(BaseModel):
