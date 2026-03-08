@@ -23,8 +23,8 @@ class OllamaModelInfo(BaseModel):
 class OllamaClient:
     """Thin wrapper around the ollama Python client."""
 
-    def __init__(self, host: str = "http://localhost:11434") -> None:
-        self._client = ollama.Client(host=host)
+    def __init__(self, host: str = "http://localhost:11434", timeout: int = 120) -> None:
+        self._client = ollama.Client(host=host, timeout=timeout)
         self._host = host
 
     def is_running(self) -> bool:
@@ -32,7 +32,7 @@ class OllamaClient:
         try:
             self._client.list()
             return True
-        except Exception:  # noqa: BLE001
+        except (ConnectionError, OSError, ollama.ResponseError, TimeoutError):
             return False
 
     def list_models(self) -> list[OllamaModelInfo]:
@@ -69,6 +69,7 @@ class OllamaClient:
         """Pull a model from the Ollama registry.
 
         Yields progress dicts with keys like 'status', 'completed', 'total'.
+        Raises ollama.ResponseError on failure (e.g., model not found).
         """
         if stream:
             response = self._client.pull(model_name, stream=True)
@@ -82,7 +83,10 @@ class OllamaClient:
             yield {"status": "success"}
 
     def remove(self, model_name: str) -> None:
-        """Remove an installed model."""
+        """Remove an installed model.
+
+        Raises ollama.ResponseError if the model is not found.
+        """
         self._client.delete(model_name)
 
     def show(self, model_name: str) -> dict[str, Any]:
@@ -98,12 +102,3 @@ class OllamaClient:
             "details": getattr(response, "details", {}),
             "model_info": getattr(response, "model_info", {}),
         }
-
-
-class ModelPullProgress(BaseModel):
-    """Progress update during a model pull."""
-
-    status: str
-    completed: int = 0
-    total: int = 0
-    percent: float = 0.0

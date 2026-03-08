@@ -19,7 +19,7 @@ console = Console()
 def _get_client() -> OllamaClient:
     """Get an OllamaClient from the current config."""
     cfg = load_config()
-    return OllamaClient(host=cfg.ollama.host)
+    return OllamaClient(host=cfg.ollama.host, timeout=cfg.ollama.timeout)
 
 
 def _check_ollama(client: OllamaClient) -> bool:
@@ -68,32 +68,39 @@ def list_models() -> None:
 
 def pull_model(name: str) -> None:
     """Pull a model from the Ollama registry."""
+    import ollama as ollama_lib
+
     client = _get_client()
     if not _check_ollama(client):
         return
 
     console.print(f"Pulling [bold]{name}[/bold]...")
 
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("{task.percentage:>3.0f}%"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Downloading", total=100)
+    try:
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.percentage:>3.0f}%"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Downloading", total=100)
 
-        for update in client.pull(name, stream=True):
-            status = update.get("status", "")
-            completed = update.get("completed", 0)
-            total = update.get("total", 0)
+            for update in client.pull(name, stream=True):
+                status = update.get("status", "")
+                completed = update.get("completed", 0)
+                total = update.get("total", 0)
 
-            if total > 0:
-                pct = (completed / total) * 100
-                progress.update(task, completed=pct, description=status)
-            else:
-                progress.update(task, description=status)
+                if total > 0:
+                    pct = (completed / total) * 100
+                    progress.update(task, completed=pct, description=status)
+                else:
+                    progress.update(task, description=status)
 
-    console.print(f"[green]Successfully pulled {name}[/green]")
+            progress.update(task, completed=100)
+
+        console.print(f"[green]Successfully pulled {name}[/green]")
+    except ollama_lib.ResponseError as e:
+        console.print(f"[red]Failed to pull {name}: {e}[/red]")
 
 
 def remove_model(name: str) -> None:
@@ -102,10 +109,12 @@ def remove_model(name: str) -> None:
     if not _check_ollama(client):
         return
 
+    import ollama as ollama_lib
+
     try:
         client.remove(name)
         console.print(f"[green]Removed {name}[/green]")
-    except Exception as e:  # noqa: BLE001
+    except ollama_lib.ResponseError as e:
         console.print(f"[red]Failed to remove {name}: {e}[/red]")
 
 
@@ -130,6 +139,8 @@ def show_model_info(name: str) -> None:
         console.print()
 
     # Also show Ollama details if installed
+    import ollama as ollama_lib
+
     client = _get_client()
     if not _check_ollama(client):
         return
@@ -146,7 +157,7 @@ def show_model_info(name: str) -> None:
             console.print(table)
         elif not card:
             console.print(f"[dim]Model {name} is installed but not in the curated registry.[/dim]")
-    except Exception as e:  # noqa: BLE001
+    except ollama_lib.ResponseError as e:
         if not card:
             console.print(f"[red]Model {name} not found in registry or Ollama: {e}[/red]")
 

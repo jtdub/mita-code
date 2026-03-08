@@ -40,6 +40,7 @@ class HardwareInfo(BaseModel):
             # Apple Silicon can use ~75% of unified memory for ML
             return self.ram_gb * 0.75
         if self.gpus:
+            # Use the largest single GPU — Ollama loads a model into one GPU
             return max(gpu.vram_gb for gpu in self.gpus)
         # CPU-only: models load into RAM, leave room for OS
         return max(0, self.ram_gb - 4)
@@ -105,15 +106,11 @@ def _detect_cpu_name() -> str:
 
     elif system == "linux":
         try:
-            result = subprocess.run(
-                ["grep", "-m1", "model name", "/proc/cpuinfo"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0 and ":" in result.stdout:
-                return result.stdout.split(":", 1)[1].strip()
-        except (subprocess.SubprocessError, FileNotFoundError):
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("model name"):
+                        return line.split(":", 1)[1].strip()
+        except (OSError, IndexError):
             pass
 
     return platform.processor() or "Unknown CPU"

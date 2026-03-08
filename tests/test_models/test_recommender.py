@@ -61,9 +61,9 @@ class TestRecommendModels:
 
     def test_discrete_gpu(self) -> None:
         """Discrete GPU VRAM should be used for filtering."""
-        hw = _make_hw(ram_gb=16, vram_gb=24)  # 24GB GPU
+        hw = _make_hw(ram_gb=32, vram_gb=24)  # 24GB GPU, 32GB RAM
         recs = recommend_models(hw)
-        # 24GB VRAM should fit the 32B models
+        # 24GB VRAM + 32GB RAM should fit the 32B models
         large_models = [r for r in recs if r.model.param_count in ("32B", "34B")]
         assert len(large_models) > 0
 

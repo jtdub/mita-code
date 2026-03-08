@@ -26,7 +26,11 @@ def recommend_models(hw: HardwareInfo) -> list[ModelRecommendation]:
     recommendations: list[ModelRecommendation] = []
 
     for model in get_coding_models():
+        if model.min_vram_gb <= 0:
+            continue
         if model.min_vram_gb > available_vram:
+            continue
+        if model.min_ram_gb > hw.ram_gb:
             continue
 
         fit_score, notes = _score_model(model, hw, available_vram)
