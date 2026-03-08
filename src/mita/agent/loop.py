@@ -152,7 +152,7 @@ async def _stream_response(
 
     # Show spinner while waiting for first token
     spinner_ctx = thinking_spinner(console)
-    spinner = spinner_ctx.__enter__()
+    spinner_ctx.__enter__()
 
     async for chunk in client.stream_chat(messages, tools=tool_schemas):
         if first_token:

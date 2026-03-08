@@ -247,9 +247,7 @@ def ensure_model(
                     completed = update.get("completed", 0)
                     total = update.get("total", 0)
                     if total > 0:
-                        progress.update(
-                            task, completed=completed, total=total, description=status
-                        )
+                        progress.update(task, completed=completed, total=total, description=status)
                     else:
                         progress.update(task, description=status)
                 progress.update(task, description="Complete")
