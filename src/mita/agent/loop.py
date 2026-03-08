@@ -93,16 +93,19 @@ async def run_agent(
         conversation.truncate_to_fit(config.model.context_window)
 
         # Call LLM
+        # Tools are described in the system prompt — don't also pass JSON schemas
+        # via the `tools` parameter, as native function calling is much slower
+        # on local models. (See CLAUDE.md: "Instructor JSON mode is the primary
+        # tool-call path.")
         messages = conversation.get_messages_for_api()
-        tool_schemas = registry.get_openai_schemas()
 
         if config.ui.stream:
             assistant_text, tool_calls_raw = await _stream_response(
-                llm_client, messages, tool_schemas, console
+                llm_client, messages, [], console
             )
         else:
             with thinking_spinner(console):
-                response = await llm_client.chat(messages, tools=tool_schemas)
+                response = await llm_client.chat(messages, tools=[])
             assistant_text, tool_calls_raw = _parse_response(response)
             if assistant_text:
                 display_markdown(console, assistant_text)
