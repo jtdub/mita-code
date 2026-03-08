@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Iterator
 from typing import Any
 
 import ollama
@@ -40,7 +40,7 @@ class OllamaClient:
         response = self._client.list()
         models: list[OllamaModelInfo] = []
         for m in response.models:
-            details = m.details or {}
+            details: Any = m.details or {}
             size_gb = round((m.size or 0) / (1024**3), 2)
 
             # Handle details as either dict or object
@@ -65,19 +65,20 @@ class OllamaClient:
             )
         return models
 
-    def pull(self, model_name: str, stream: bool = True) -> Generator[dict[str, Any], None, None]:
+    def pull(self, model_name: str, stream: bool = True) -> Iterator[dict[str, Any]]:
         """Pull a model from the Ollama registry.
 
         Yields progress dicts with keys like 'status', 'completed', 'total'.
         """
-        response = self._client.pull(model_name, stream=stream)
         if stream:
+            response = self._client.pull(model_name, stream=True)
             for chunk in response:
                 if isinstance(chunk, dict):
                     yield chunk
                 else:
                     yield {"status": getattr(chunk, "status", str(chunk))}
         else:
+            self._client.pull(model_name, stream=False)
             yield {"status": "success"}
 
     def remove(self, model_name: str) -> None:
