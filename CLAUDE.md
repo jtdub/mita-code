@@ -40,9 +40,12 @@ Think "Claude Code but 100% local."
 
 ## Coding Standards
 
+- **Package manager**: Poetry
 - **Formatting**: Ruff (format + lint)
+- **Linting**: Ruff + pylint
 - **Type checking**: mypy (strict)
 - **Tests**: pytest + pytest-asyncio
+- **Task runner**: Invoke (`tasks.py`) — run `invoke test`, `invoke lint`, `invoke check`
 - **Models**: Pydantic v2 for all data models
 - **Imports**: Use absolute imports (`from mita.config.schema import MitaConfig`)
 - **No wildcard imports**
@@ -88,9 +91,9 @@ Think "Claude Code but 100% local."
 
 ### Running the project locally during development
 ```bash
-pip install -e ".[dev]"
-mita --version
-mita doctor
+poetry install
+poetry run mita --version
+poetry run mita doctor
 ```
 
 ## Important File Paths

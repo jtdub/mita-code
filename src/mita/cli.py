@@ -1,0 +1,180 @@
+"""Typer CLI app — top-level command routing for Mita Code."""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+import typer
+from rich.console import Console
+from rich.syntax import Syntax
+
+import mita
+from mita.config.loader import load_config
+from mita.memory.manager import add_memory, edit_memory, show_memory, show_memory_paths
+
+console = Console()
+
+app = typer.Typer(
+    name="mita",
+    help="Local-first agentic coding assistant powered by Ollama.",
+    no_args_is_help=True,
+    add_completion=True,
+)
+
+
+# ── Version ───────────────────────────────────────────────────────
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(f"mita {mita.__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: Annotated[
+        bool | None,
+        typer.Option(
+            "--version",
+            "-v",
+            help="Show version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = None,
+) -> None:
+    """Mita Code — local-first agentic coding assistant."""
+
+
+# ── Config commands ───────────────────────────────────────────────
+
+config_app = typer.Typer(help="Configuration management.")
+app.add_typer(config_app, name="config")
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Show the merged configuration."""
+    cfg = load_config()
+    toml_str = _config_to_toml(cfg)
+    console.print(Syntax(toml_str, "toml", theme="monokai"))
+
+
+@config_app.command("path")
+def config_path() -> None:
+    """Show config file paths."""
+    from mita.config.defaults import get_global_config_path, get_project_config_path
+
+    global_path = get_global_config_path()
+    project_path = get_project_config_path()
+
+    console.print(f"  Global:  {global_path}", style="bold" if global_path.is_file() else "dim")
+    if project_path:
+        console.print(f"  Project: {project_path}", style="bold")
+    else:
+        console.print("  Project: [dim]not found[/dim]")
+
+
+# ── Memory commands ───────────────────────────────────────────────
+
+memory_app = typer.Typer(help="MITA.md memory management.")
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("show")
+def memory_show() -> None:
+    """Show all discovered memory content."""
+    show_memory()
+
+
+@memory_app.command("path")
+def memory_path() -> None:
+    """Show discovered memory file paths."""
+    show_memory_paths()
+
+
+@memory_app.command("edit")
+def memory_edit(
+    is_global: Annotated[bool, typer.Option("--global", "-g", help="Edit global memory.")] = False,
+    project: Annotated[bool, typer.Option("--project", "-p", help="Edit project memory.")] = False,
+) -> None:
+    """Open a MITA.md file in $EDITOR."""
+    if is_global:
+        edit_memory("global")
+    elif project:
+        edit_memory("project")
+    else:
+        edit_memory()
+
+
+@memory_app.command("add")
+def memory_add(
+    text: Annotated[str, typer.Argument(help="Text to add to memory.")],
+    is_global: Annotated[
+        bool, typer.Option("--global", "-g", help="Add to global memory.")
+    ] = False,
+    project: Annotated[
+        bool, typer.Option("--project", "-p", help="Add to project memory.")
+    ] = False,
+) -> None:
+    """Append a line to a MITA.md file."""
+    if is_global:
+        add_memory(text, "global")
+    elif project:
+        add_memory(text, "project")
+    else:
+        add_memory(text, "project")
+
+
+# ── Helpers ───────────────────────────────────────────────────────
+
+
+def _config_to_toml(cfg: object) -> str:
+    """Convert a MitaConfig to a TOML-formatted string for display."""
+    from mita.config.schema import MitaConfig
+
+    assert isinstance(cfg, MitaConfig)
+    data = cfg.model_dump()
+    lines: list[str] = []
+    _dict_to_toml(data, lines, prefix="")
+    return "\n".join(lines)
+
+
+def _dict_to_toml(data: dict, lines: list[str], prefix: str) -> None:  # type: ignore[type-arg]
+    """Recursively format a dict as TOML."""
+    scalars = {k: v for k, v in data.items() if not isinstance(v, (dict, list))}
+    dicts = {k: v for k, v in data.items() if isinstance(v, dict)}
+    lists = {k: v for k, v in data.items() if isinstance(v, list)}
+
+    for k, v in scalars.items():
+        lines.append(f"{k} = {_toml_value(v)}")
+
+    for k, v in lists.items():
+        if v and isinstance(v[0], dict):
+            # Array of tables
+            for item in v:
+                section = f"{prefix}{k}" if prefix else k
+                lines.append(f"\n[[{section}]]")
+                _dict_to_toml(item, lines, prefix=f"{section}.")
+        else:
+            lines.append(f"{k} = {_toml_value(v)}")
+
+    for k, v in dicts.items():
+        section = f"{prefix}{k}" if prefix else k
+        lines.append(f"\n[{section}]")
+        _dict_to_toml(v, lines, prefix=f"{section}.")
+
+
+def _toml_value(v: object) -> str:
+    """Format a Python value as a TOML value string."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        return f'"{v}"'
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        items = ", ".join(_toml_value(i) for i in v)
+        return f"[{items}]"
+    return repr(v)
