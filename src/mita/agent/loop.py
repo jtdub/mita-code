@@ -187,9 +187,9 @@ def _accumulate_tool_call_deltas(
                 idx = 0
 
             if idx not in tool_calls_by_index:
-                tc_id = (
-                    getattr(tc, "id", "") if hasattr(tc, "id") else tc.get("id", "")
-                ) or str(uuid.uuid4())
+                tc_id = (getattr(tc, "id", "") if hasattr(tc, "id") else tc.get("id", "")) or str(
+                    uuid.uuid4()
+                )
                 tool_calls_by_index[idx] = {
                     "id": tc_id,
                     "type": "function",
@@ -200,9 +200,7 @@ def _accumulate_tool_call_deltas(
             func = getattr(tc, "function", None) if hasattr(tc, "function") else tc.get("function")
 
             if func is not None:
-                fname = (
-                    getattr(func, "name", None) if hasattr(func, "name") else func.get("name")
-                )
+                fname = getattr(func, "name", None) if hasattr(func, "name") else func.get("name")
                 if fname:
                     entry["function"]["name"] += fname
 
