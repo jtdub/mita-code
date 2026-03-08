@@ -148,8 +148,17 @@ async def _stream_response(
     """
     full_text = ""
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
+    first_token = True
+
+    # Show spinner while waiting for first token
+    spinner_ctx = thinking_spinner(console)
+    spinner = spinner_ctx.__enter__()
 
     async for chunk in client.stream_chat(messages, tools=tool_schemas):
+        if first_token:
+            spinner_ctx.__exit__(None, None, None)
+            first_token = False
+
         delta = _extract_delta(chunk)
         if delta:
             full_text += delta
@@ -157,6 +166,10 @@ async def _stream_response(
 
         # Accumulate tool call deltas
         _accumulate_tool_call_deltas(chunk, tool_calls_by_index)
+
+    # Clean up spinner if no chunks arrived at all
+    if first_token:
+        spinner_ctx.__exit__(None, None, None)
 
     if full_text:
         display_streaming_end(console)
