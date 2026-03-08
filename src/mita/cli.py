@@ -192,6 +192,47 @@ def models_hardware() -> None:
     show_hardware()
 
 
+# ── Chat / Ask commands ───────────────────────────────────────────
+
+
+@app.command("chat")
+def chat_command() -> None:
+    """Open an interactive chat session with the agent."""
+    import asyncio
+
+    from mita.agent.conversation import Conversation
+    from mita.agent.loop import run_agent
+    from mita.config.loader import load_config as _load_config
+    from mita.ui.display import get_console
+    from mita.ui.repl import repl_loop
+
+    cfg = _load_config()
+    chat_console = get_console()
+    conversation = Conversation()
+
+    async def on_input(user_input: str) -> None:
+        nonlocal conversation
+        conversation = await run_agent(user_input, cfg, chat_console, conversation=conversation)
+
+    asyncio.run(repl_loop(chat_console, on_input))
+
+
+@app.command("ask")
+def ask_command(
+    prompt: Annotated[str, typer.Argument(help="The prompt to send to the agent.")],
+) -> None:
+    """Send a single prompt to the agent (non-interactive)."""
+    import asyncio
+
+    from mita.agent.loop import run_agent
+    from mita.config.loader import load_config as _load_config
+    from mita.ui.display import get_console
+
+    cfg = _load_config()
+    ask_console = get_console()
+    asyncio.run(run_agent(prompt, cfg, ask_console))
+
+
 # ── Helpers ───────────────────────────────────────────────────────
 
 

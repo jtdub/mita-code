@@ -1,0 +1,244 @@
+"""Core async agent loop: prompt → LLM → parse tool calls → execute → loop."""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from rich.console import Console
+
+from mita.agent.context import assemble_context
+from mita.agent.conversation import Conversation, Message, Role
+from mita.config.schema import MitaConfig
+from mita.llm.client import LLMClient
+from mita.tools.executor import execute_tool
+from mita.tools.registry import ToolRegistry, create_default_registry
+from mita.tools.schema import ToolCall
+from mita.ui.display import (
+    display_error,
+    display_markdown,
+    display_streaming_end,
+    display_streaming_token,
+    display_token_usage,
+    display_tool_call,
+    display_tool_result,
+    prompt_user_confirm,
+)
+from mita.ui.spinner import thinking_spinner
+
+MAX_ITERATIONS = 25
+
+
+async def run_agent(
+    user_prompt: str,
+    config: MitaConfig,
+    console: Console,
+    conversation: Conversation | None = None,
+    registry: ToolRegistry | None = None,
+    llm_client: LLMClient | None = None,
+) -> Conversation:
+    """Run the agent loop for a single user prompt.
+
+    Args:
+        user_prompt: The user's input.
+        config: Application configuration.
+        console: Rich console for output.
+        conversation: Existing conversation to continue, or None to start fresh.
+        registry: Tool registry, or None to create default.
+        llm_client: LLM client, or None to create from config.
+
+    Returns:
+        The updated conversation.
+    """
+    # Initialize
+    if registry is None:
+        registry = create_default_registry()
+    if llm_client is None:
+        llm_client = LLMClient(config)
+    if conversation is None:
+        conversation = Conversation()
+        assemble_context(conversation, config, registry)
+
+    # Add user message
+    conversation.add(Message(role=Role.USER, content=user_prompt))
+
+    # Agent loop
+    for iteration in range(MAX_ITERATIONS):
+        # Truncate to fit context window
+        conversation.truncate_to_fit(config.model.context_window)
+
+        # Call LLM
+        messages = conversation.get_messages_for_api()
+        tool_schemas = registry.get_openai_schemas()
+
+        if config.ui.stream:
+            assistant_text = await _stream_response(llm_client, messages, tool_schemas, console)
+        else:
+            with thinking_spinner(console):
+                response = await llm_client.chat(messages, tools=tool_schemas)
+            assistant_text, tool_calls_raw = _parse_response(response)
+            if assistant_text:
+                display_markdown(console, assistant_text)
+
+            # Handle tool calls from non-streaming response
+            if tool_calls_raw:
+                conversation.add(
+                    Message(
+                        role=Role.ASSISTANT,
+                        content=assistant_text,
+                        tool_calls=tool_calls_raw,
+                    )
+                )
+                await _process_tool_calls(tool_calls_raw, conversation, registry, config, console)
+                continue
+
+        # For streaming, we need to check for tool calls differently
+        # Add assistant message
+        conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+
+        # If no tool calls were made, we're done
+        break
+    else:
+        display_error(
+            console,
+            f"Reached maximum iterations ({MAX_ITERATIONS}). Stopping.",
+        )
+
+    # Display token usage
+    if config.ui.show_token_count:
+        display_token_usage(console, conversation.total_tokens)
+
+    return conversation
+
+
+async def _stream_response(
+    client: LLMClient,
+    messages: list[dict[str, Any]],
+    tool_schemas: list[dict[str, Any]],
+    console: Console,
+) -> str:
+    """Stream the LLM response, displaying tokens as they arrive."""
+    full_text = ""
+    async for chunk in client.stream_chat(messages, tools=tool_schemas):
+        delta = _extract_delta(chunk)
+        if delta:
+            full_text += delta
+            display_streaming_token(console, delta)
+
+    if full_text:
+        display_streaming_end(console)
+
+    return full_text
+
+
+def _extract_delta(chunk: Any) -> str:
+    """Extract text content from a streaming chunk."""
+    try:
+        choices = chunk.choices if hasattr(chunk, "choices") else chunk.get("choices", [])
+        if not choices:
+            return ""
+        delta = choices[0].delta if hasattr(choices[0], "delta") else choices[0].get("delta", {})
+        if hasattr(delta, "content"):
+            return delta.content or ""
+        if isinstance(delta, dict):
+            return delta.get("content", "") or ""
+    except (IndexError, AttributeError, KeyError):
+        pass
+    return ""
+
+
+def _parse_response(response: Any) -> tuple[str, list[dict[str, Any]]]:
+    """Parse a non-streaming LLM response into text and tool calls."""
+    try:
+        choices = response.choices if hasattr(response, "choices") else response.get("choices", [])
+        if not choices:
+            return "", []
+
+        message = (
+            choices[0].message if hasattr(choices[0], "message") else choices[0].get("message", {})
+        )
+
+        content = ""
+        if hasattr(message, "content"):
+            content = message.content or ""
+        elif isinstance(message, dict):
+            content = message.get("content", "") or ""
+
+        tool_calls: list[dict[str, Any]] = []
+        raw_calls = (
+            message.tool_calls
+            if hasattr(message, "tool_calls")
+            else message.get("tool_calls")
+            if isinstance(message, dict)
+            else None
+        )
+        if raw_calls:
+            for tc in raw_calls:
+                if hasattr(tc, "function"):
+                    tool_calls.append(
+                        {
+                            "id": getattr(tc, "id", str(uuid.uuid4())),
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                    )
+                elif isinstance(tc, dict):
+                    tool_calls.append(tc)
+
+        return content, tool_calls
+    except (IndexError, AttributeError, KeyError):
+        return "", []
+
+
+async def _process_tool_calls(
+    tool_calls_raw: list[dict[str, Any]],
+    conversation: Conversation,
+    registry: ToolRegistry,
+    config: MitaConfig,
+    console: Console,
+) -> None:
+    """Process tool calls from an LLM response."""
+    import json
+
+    for tc_raw in tool_calls_raw:
+        func = tc_raw.get("function", {})
+        tc_id = tc_raw.get("id", str(uuid.uuid4()))
+        name = func.get("name", "") if isinstance(func, dict) else ""
+        args_raw = func.get("arguments", "{}") if isinstance(func, dict) else "{}"
+
+        # Parse arguments
+        if isinstance(args_raw, str):
+            try:
+                arguments = json.loads(args_raw)
+            except json.JSONDecodeError:
+                arguments = {}
+        else:
+            arguments = args_raw if isinstance(args_raw, dict) else {}
+
+        tool_call = ToolCall(id=tc_id, name=name, arguments=arguments)
+
+        # Display the tool call
+        display_tool_call(console, tool_call)
+
+        # Create confirm function bound to console
+        async def confirm_fn(prompt: str) -> bool:
+            return await prompt_user_confirm(console, prompt)
+
+        # Execute with safety checks
+        result = await execute_tool(tool_call, registry, config.tools, confirm_fn=confirm_fn)
+
+        # Display result
+        display_tool_result(console, result)
+
+        # Add tool result to conversation
+        conversation.add(
+            Message(
+                role=Role.TOOL,
+                content=result.output if result.success else (result.error or "Error"),
+                tool_call_id=tc_id,
+                name=name,
+            )
+        )
