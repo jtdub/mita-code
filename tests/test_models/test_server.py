@@ -30,8 +30,8 @@ def _isolate_pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     pid_dir = tmp_path / "mita"
     pid_dir.mkdir()
-    monkeypatch.setattr(mod, "_PID_DIR", pid_dir)
-    monkeypatch.setattr(mod, "_PID_FILE", pid_dir / "ollama.pid")
+    monkeypatch.setattr(mod, "_get_pid_dir", lambda: pid_dir)
+    monkeypatch.setattr(mod, "_get_pid_file", lambda: pid_dir / "ollama.pid")
 
 
 class TestFindOllamaBinary:
@@ -121,7 +121,7 @@ class TestStartServer:
             patch("mita.models.server.time.sleep"),
         ):
             start_server(timeout=5)
-            assert mod._PID_FILE.read_text() == "42"
+            assert mod._get_pid_file().read_text() == "42"
 
     def test_process_exits_unexpectedly(self) -> None:
         mock_proc = MagicMock(spec=subprocess.Popen)
@@ -185,7 +185,7 @@ class TestStopServer:
         ):
             mock_kill.side_effect = [None, None, ProcessLookupError]
             stop_server()
-            assert not mod._PID_FILE.exists()
+            assert not mod._get_pid_file().exists()
 
 
 class TestIsManaged:

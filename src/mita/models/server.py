@@ -17,8 +17,15 @@ from rich.console import Console
 
 from mita.models.ollama_client import OllamaClient
 
-_PID_DIR = Path("~/.config/mita").expanduser()
-_PID_FILE = _PID_DIR / "ollama.pid"
+
+def _get_pid_dir() -> Path:
+    """Return the directory for the PID file (lazy to avoid module-level Path.home())."""
+    return Path.home() / ".config" / "mita"
+
+
+def _get_pid_file() -> Path:
+    """Return the PID file path (lazy to avoid module-level Path.home())."""
+    return _get_pid_dir() / "ollama.pid"
 
 
 def find_ollama_binary() -> str | None:
@@ -35,7 +42,7 @@ def is_server_running(host: str = "http://localhost:11434", timeout: int = 5) ->
 def _read_pid() -> int | None:
     """Read the PID from the PID file, return None if missing or stale."""
     try:
-        pid = int(_PID_FILE.read_text().strip())
+        pid = int(_get_pid_file().read_text().strip())
         # Check if process is alive
         os.kill(pid, 0)
         return pid
@@ -46,14 +53,14 @@ def _read_pid() -> int | None:
 
 def _write_pid(pid: int) -> None:
     """Write a PID to the PID file."""
-    _PID_DIR.mkdir(parents=True, exist_ok=True)
-    _PID_FILE.write_text(str(pid))
+    _get_pid_dir().mkdir(parents=True, exist_ok=True)
+    _get_pid_file().write_text(str(pid))
 
 
 def _remove_pid_file() -> None:
     """Remove the PID file if it exists."""
     try:
-        _PID_FILE.unlink()
+        _get_pid_file().unlink()
     except FileNotFoundError:
         pass
 
