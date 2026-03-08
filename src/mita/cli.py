@@ -370,7 +370,7 @@ def chat_command() -> None:
     from mita.agent.conversation import Conversation
     from mita.agent.loop import run_agent
     from mita.config.loader import load_config as _load_config
-    from mita.models.server import ensure_server
+    from mita.models.server import ensure_model, ensure_server
     from mita.ui.display import get_console
     from mita.ui.repl import repl_loop
 
@@ -379,6 +379,11 @@ def chat_command() -> None:
 
     if not ensure_server(
         host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=chat_console
+    ):
+        raise typer.Exit(1)
+
+    if not ensure_model(
+        cfg.model.default, host=cfg.ollama.host, timeout=cfg.ollama.timeout, console=chat_console
     ):
         raise typer.Exit(1)
 
@@ -404,7 +409,7 @@ def ask_command(
 
     from mita.agent.loop import run_agent
     from mita.config.loader import load_config as _load_config
-    from mita.models.server import ensure_server
+    from mita.models.server import ensure_model, ensure_server
     from mita.ui.display import get_console
 
     cfg = _load_config()
@@ -412,6 +417,11 @@ def ask_command(
 
     if not ensure_server(
         host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=ask_console
+    ):
+        raise typer.Exit(1)
+
+    if not ensure_model(
+        cfg.model.default, host=cfg.ollama.host, timeout=cfg.ollama.timeout, console=ask_console
     ):
         raise typer.Exit(1)
 

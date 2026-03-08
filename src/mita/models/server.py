@@ -184,3 +184,66 @@ def ensure_server(
         return False
 
     return start_server(host=host, console=console)
+
+
+def ensure_model(
+    model_name: str,
+    host: str = "http://localhost:11434",
+    timeout: int = 120,
+    console: Console | None = None,
+) -> bool:
+    """Ensure a model is installed, pulling it automatically if missing."""
+    client = OllamaClient(host=host, timeout=timeout)
+
+    # Check if model is already installed
+    try:
+        installed = client.list_models()
+        for m in installed:
+            # Match both exact name and name without tag
+            if m.name == model_name or m.name == f"{model_name}:latest":
+                return True
+            # Also match if user specified without tag
+            if m.name.split(":")[0] == model_name.split(":")[0] and (
+                ":" not in model_name or m.name == model_name
+            ):
+                return True
+    except (ConnectionError, OSError):
+        if console:
+            console.print("[red]Cannot connect to Ollama to check models.[/red]")
+        return False
+
+    # Model not found — pull it
+    if console:
+        console.print(f"[yellow]Model '{model_name}' is not installed.[/yellow]")
+        console.print(f"[dim]Pulling {model_name}...[/dim]")
+
+    try:
+        from rich.progress import BarColumn, Progress, TextColumn
+
+        if console:
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("{task.percentage:>3.0f}%"),
+                console=console,
+            ) as progress:
+                task = progress.add_task("Downloading", total=100)
+                for update in client.pull(model_name, stream=True):
+                    status = update.get("status", "")
+                    completed = update.get("completed", 0)
+                    total = update.get("total", 0)
+                    if total > 0:
+                        pct = (completed / total) * 100
+                        progress.update(task, completed=pct, description=status)
+                    else:
+                        progress.update(task, description=status)
+                progress.update(task, completed=100)
+            console.print(f"[green]Model '{model_name}' pulled successfully.[/green]")
+        else:
+            for _update in client.pull(model_name, stream=False):
+                pass
+        return True
+    except Exception as e:
+        if console:
+            console.print(f"[red]Failed to pull '{model_name}': {e}[/red]")
+        return False

@@ -8,10 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mita.models.ollama_client import OllamaModelInfo
 from mita.models.server import (
     _read_pid,
     _remove_pid_file,
     _write_pid,
+    ensure_model,
     ensure_server,
     find_ollama_binary,
     is_managed,
@@ -212,3 +214,39 @@ class TestEnsureServer:
         ):
             assert ensure_server(auto_manage=True) is True
             mock_start.assert_called_once()
+
+
+class TestEnsureModel:
+    def _make_models(self, *names: str) -> list[OllamaModelInfo]:
+        return [OllamaModelInfo(name=n, size_gb=1.0) for n in names]
+
+    def test_model_already_installed(self) -> None:
+        with patch("mita.models.server.OllamaClient") as mock_cls:
+            mock_cls.return_value.list_models.return_value = self._make_models("qwen2.5-coder:7b")
+            assert ensure_model("qwen2.5-coder:7b") is True
+
+    def test_model_installed_without_tag(self) -> None:
+        with patch("mita.models.server.OllamaClient") as mock_cls:
+            mock_cls.return_value.list_models.return_value = self._make_models(
+                "qwen2.5-coder:latest"
+            )
+            assert ensure_model("qwen2.5-coder") is True
+
+    def test_model_not_installed_pulls(self) -> None:
+        with patch("mita.models.server.OllamaClient") as mock_cls:
+            mock_cls.return_value.list_models.return_value = []
+            mock_cls.return_value.pull.return_value = iter([{"status": "success"}])
+            assert ensure_model("qwen2.5-coder:7b") is True
+
+    def test_pull_failure(self) -> None:
+        import ollama as ollama_lib
+
+        with patch("mita.models.server.OllamaClient") as mock_cls:
+            mock_cls.return_value.list_models.return_value = []
+            mock_cls.return_value.pull.side_effect = ollama_lib.ResponseError("not found")
+            assert ensure_model("bad-model") is False
+
+    def test_connection_error(self) -> None:
+        with patch("mita.models.server.OllamaClient") as mock_cls:
+            mock_cls.return_value.list_models.side_effect = ConnectionError
+            assert ensure_model("test-model") is False
