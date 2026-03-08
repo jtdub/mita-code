@@ -69,6 +69,7 @@ class LLMClient:
             "max_tokens": self._max_tokens,
             "api_base": self._api_base,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if tools:
             kwargs["tools"] = tools
