@@ -54,15 +54,19 @@ def start_server(
     if console:
         console.print("[dim]Starting Ollama server...[/dim]")
 
-    # Parse host/port for OLLAMA_HOST env var
+    # Inherit full environment, override OLLAMA_HOST if non-default
+    import os
+
+    env = os.environ.copy()
     env_host = host.replace("http://", "").replace("https://", "")
+    env["OLLAMA_HOST"] = env_host
 
     try:
         _managed_process = subprocess.Popen(
             [binary, "serve"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            env={"OLLAMA_HOST": env_host, "PATH": _get_path()},
+            env=env,
         )
     except OSError as e:
         if console:
@@ -148,8 +152,3 @@ def ensure_server(
     return start_server(host=host, console=console)
 
 
-def _get_path() -> str:
-    """Get PATH from the current environment."""
-    import os
-
-    return os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
