@@ -101,4 +101,6 @@ class MitaConfig(BaseModel):
     ui: UISettings = Field(default_factory=UISettings)
     hooks: list[HookDefinition] = Field(default_factory=list)
     plugins: list[PluginDefinition] = Field(default_factory=list)
-    skills_paths: list[str] = Field(default_factory=lambda: ["~/.config/mita/skills"])
+    skills_paths: list[str] = Field(
+        default_factory=lambda: ["~/.config/mita/skills", ".mita/skills"]
+    )
