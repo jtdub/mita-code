@@ -225,26 +225,34 @@ def ensure_model(
         console.print(f"[dim]Pulling {model_name}...[/dim]")
 
     try:
-        from rich.progress import BarColumn, Progress, TextColumn
+        from rich.progress import (
+            BarColumn,
+            DownloadColumn,
+            Progress,
+            TextColumn,
+            TransferSpeedColumn,
+        )
 
         if console:
             with Progress(
                 TextColumn("[progress.description]{task.description}"),
                 BarColumn(),
-                TextColumn("{task.percentage:>3.0f}%"),
+                DownloadColumn(),
+                TransferSpeedColumn(),
                 console=console,
             ) as progress:
-                task = progress.add_task("Downloading", total=100)
+                task = progress.add_task("Downloading", total=None)
                 for update in client.pull(model_name, stream=True):
                     status = update.get("status", "")
                     completed = update.get("completed", 0)
                     total = update.get("total", 0)
                     if total > 0:
-                        pct = (completed / total) * 100
-                        progress.update(task, completed=pct, description=status)
+                        progress.update(
+                            task, completed=completed, total=total, description=status
+                        )
                     else:
                         progress.update(task, description=status)
-                progress.update(task, completed=100)
+                progress.update(task, description="Complete")
             console.print(f"[green]Model '{model_name}' pulled successfully.[/green]")
         else:
             for _update in client.pull(model_name, stream=False):
