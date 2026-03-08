@@ -37,6 +37,10 @@ ollama = ">=0.3.0"
 litellm = "^1.82.0"
 instructor = "^1.14.5"
 prompt-toolkit = "^3.0.52"
+lancedb = "0.25.3"
+tree-sitter = ">=0.23.0"
+tree-sitter-language-pack = ">=0.6.0"
+pandas = "^3.0.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
