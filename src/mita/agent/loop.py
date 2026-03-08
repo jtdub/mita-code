@@ -27,6 +27,7 @@ from mita.ui.display import (
 from mita.ui.spinner import thinking_spinner
 
 MAX_ITERATIONS = 25
+_RAG_CONTEXT_PREFIX = "Relevant code from the project index:"
 
 
 async def run_agent(
@@ -62,7 +63,7 @@ async def run_agent(
     # Add user message
     conversation.add(Message(role=Role.USER, content=user_prompt))
 
-    # Inject RAG context if index is available
+    # Inject RAG context if index is available (replace previous RAG message)
     if config.index.enabled:
         try:
             from mita.index.retriever import Retriever
@@ -71,13 +72,19 @@ async def run_agent(
             if retriever.is_available():
                 rag_context = await retriever.retrieve_formatted(user_prompt)
                 if rag_context:
+                    # Remove any previous RAG context message
+                    conversation.messages = [
+                        m
+                        for m in conversation.messages
+                        if not (m.role == Role.SYSTEM and m.content.startswith(_RAG_CONTEXT_PREFIX))
+                    ]
                     conversation.add(
                         Message(
                             role=Role.SYSTEM,
-                            content=f"Relevant code from the project index:\n{rag_context}",
+                            content=f"{_RAG_CONTEXT_PREFIX}\n{rag_context}",
                         )
                     )
-        except Exception:  # noqa: BLE001
+        except (ConnectionError, FileNotFoundError, ImportError, OSError):
             pass  # Index unavailable; proceed without RAG
 
     # Agent loop

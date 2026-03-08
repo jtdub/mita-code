@@ -23,8 +23,15 @@ def _get_index_dir() -> Path:
     return Path.cwd() / ".mita" / "index"
 
 
-async def build_index(force: bool = False) -> None:
-    """Build the codebase index."""
+async def build_index(force: bool = False, pull_model_fn: object | None = None) -> None:
+    """Build the codebase index.
+
+    Args:
+        force: Rebuild even if index already exists.
+        pull_model_fn: Async callback to pull the embedding model if missing.
+            Signature: async (MitaConfig) -> bool. Called from the CLI layer
+            so it can import from mita.models without violating dependency rules.
+    """
     config = load_config()
     index_dir = _get_index_dir()
     store = IndexStore(index_dir)
@@ -37,18 +44,11 @@ async def build_index(force: bool = False) -> None:
     # Check embedding model availability
     embedder = EmbeddingClient(config)
     if not await embedder.is_model_available():
-        console.print(f"[yellow]Embedding model '{embedder.model}' is not installed.[/yellow]")
-        confirm = console.input(f"Pull '{embedder.model}' now? [Y/n] ").strip().lower()
-        if confirm in ("", "y", "yes"):
-            from mita.models.ollama_client import OllamaClient
-
-            client = OllamaClient(host=config.ollama.host)
-            console.print(f"Pulling {embedder.model}...")
-            for _progress in client.pull(embedder.model):
-                pass
-            console.print("[green]Model pulled successfully.[/green]")
+        if pull_model_fn is not None:
+            if not await pull_model_fn(config):  # type: ignore[operator]
+                return
         else:
-            console.print("[red]Cannot build index without embedding model.[/red]")
+            console.print("[red]Embedding model not available.[/red]")
             return
 
     start_time = time.monotonic()

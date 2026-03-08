@@ -50,6 +50,7 @@ class IndexSettings(BaseModel):
     exclude_patterns: list[str] = Field(
         default_factory=lambda: [
             "*.lock",
+            ".mita/**",
             "node_modules/**",
             ".git/**",
             "*.min.js",

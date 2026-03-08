@@ -207,7 +207,27 @@ def index_build(
 
     from mita.index.manager import build_index
 
-    asyncio.run(build_index(force=force))
+    async def _ensure_model(config: object) -> bool:
+        """Pull the embedding model if missing. Lives in cli.py to respect dependency rules."""
+        from mita.config.schema import MitaConfig
+        from mita.index.embeddings import EmbeddingClient
+        from mita.models.ollama_client import OllamaClient
+
+        assert isinstance(config, MitaConfig)
+        embedder = EmbeddingClient(config)
+        console.print(f"[yellow]Embedding model '{embedder.model}' is not installed.[/yellow]")
+        confirm = console.input(f"Pull '{embedder.model}' now? [Y/n] ").strip().lower()
+        if confirm not in ("", "y", "yes"):
+            console.print("[red]Cannot build index without embedding model.[/red]")
+            return False
+        client = OllamaClient(host=config.ollama.host)
+        console.print(f"Pulling {embedder.model}...")
+        for _progress in client.pull(embedder.model):
+            pass
+        console.print("[green]Model pulled successfully.[/green]")
+        return True
+
+    asyncio.run(build_index(force=force, pull_model_fn=_ensure_model))
 
 
 @index_app.command("status")
