@@ -214,7 +214,11 @@ def chat_command() -> None:
         nonlocal conversation
         conversation = await run_agent(user_input, cfg, chat_console, conversation=conversation)
 
-    asyncio.run(repl_loop(chat_console, on_input))
+    def on_clear() -> None:
+        nonlocal conversation
+        conversation.clear_non_system()
+
+    asyncio.run(repl_loop(chat_console, on_input, on_clear=on_clear))
 
 
 @app.command("ask")

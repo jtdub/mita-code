@@ -72,7 +72,9 @@ async def run_agent(
         tool_schemas = registry.get_openai_schemas()
 
         if config.ui.stream:
-            assistant_text = await _stream_response(llm_client, messages, tool_schemas, console)
+            assistant_text, tool_calls_raw = await _stream_response(
+                llm_client, messages, tool_schemas, console
+            )
         else:
             with thinking_spinner(console):
                 response = await llm_client.chat(messages, tools=tool_schemas)
@@ -80,23 +82,20 @@ async def run_agent(
             if assistant_text:
                 display_markdown(console, assistant_text)
 
-            # Handle tool calls from non-streaming response
-            if tool_calls_raw:
-                conversation.add(
-                    Message(
-                        role=Role.ASSISTANT,
-                        content=assistant_text,
-                        tool_calls=tool_calls_raw,
-                    )
+        # Handle tool calls
+        if tool_calls_raw:
+            conversation.add(
+                Message(
+                    role=Role.ASSISTANT,
+                    content=assistant_text,
+                    tool_calls=tool_calls_raw,
                 )
-                await _process_tool_calls(tool_calls_raw, conversation, registry, config, console)
-                continue
+            )
+            await _process_tool_calls(tool_calls_raw, conversation, registry, config, console)
+            continue
 
-        # For streaming, we need to check for tool calls differently
-        # Add assistant message
+        # No tool calls — add assistant message and stop
         conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-
-        # If no tool calls were made, we're done
         break
     else:
         display_error(
@@ -116,19 +115,30 @@ async def _stream_response(
     messages: list[dict[str, Any]],
     tool_schemas: list[dict[str, Any]],
     console: Console,
-) -> str:
-    """Stream the LLM response, displaying tokens as they arrive."""
+) -> tuple[str, list[dict[str, Any]]]:
+    """Stream the LLM response, displaying tokens as they arrive.
+
+    Returns:
+        Tuple of (text_content, tool_calls_raw).
+    """
     full_text = ""
+    tool_calls_by_index: dict[int, dict[str, Any]] = {}
+
     async for chunk in client.stream_chat(messages, tools=tool_schemas):
         delta = _extract_delta(chunk)
         if delta:
             full_text += delta
             display_streaming_token(console, delta)
 
+        # Accumulate tool call deltas
+        _accumulate_tool_call_deltas(chunk, tool_calls_by_index)
+
     if full_text:
         display_streaming_end(console)
 
-    return full_text
+    # Convert accumulated tool calls to list
+    tool_calls_raw = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
+    return full_text, tool_calls_raw
 
 
 def _extract_delta(chunk: Any) -> str:
@@ -145,6 +155,66 @@ def _extract_delta(chunk: Any) -> str:
     except (IndexError, AttributeError, KeyError):
         pass
     return ""
+
+
+def _accumulate_tool_call_deltas(
+    chunk: Any, tool_calls_by_index: dict[int, dict[str, Any]]
+) -> None:
+    """Accumulate tool call deltas from a streaming chunk.
+
+    Streaming tool calls arrive as incremental deltas indexed by position.
+    This function merges them into complete tool call dicts.
+    """
+    try:
+        choices = chunk.choices if hasattr(chunk, "choices") else chunk.get("choices", [])
+        if not choices:
+            return
+        delta = choices[0].delta if hasattr(choices[0], "delta") else choices[0].get("delta", {})
+
+        raw_tcs = (
+            delta.tool_calls
+            if hasattr(delta, "tool_calls")
+            else delta.get("tool_calls")
+            if isinstance(delta, dict)
+            else None
+        )
+        if not raw_tcs:
+            return
+
+        for tc in raw_tcs:
+            idx = getattr(tc, "index", None) if hasattr(tc, "index") else tc.get("index", 0)
+            if idx is None:
+                idx = 0
+
+            if idx not in tool_calls_by_index:
+                tc_id = (
+                    getattr(tc, "id", "") if hasattr(tc, "id") else tc.get("id", "")
+                ) or str(uuid.uuid4())
+                tool_calls_by_index[idx] = {
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                }
+
+            entry = tool_calls_by_index[idx]
+            func = getattr(tc, "function", None) if hasattr(tc, "function") else tc.get("function")
+
+            if func is not None:
+                fname = (
+                    getattr(func, "name", None) if hasattr(func, "name") else func.get("name")
+                )
+                if fname:
+                    entry["function"]["name"] += fname
+
+                fargs = (
+                    getattr(func, "arguments", None)
+                    if hasattr(func, "arguments")
+                    else func.get("arguments")
+                )
+                if fargs:
+                    entry["function"]["arguments"] += fargs
+    except (IndexError, AttributeError, KeyError):
+        pass
 
 
 def _parse_response(response: Any) -> tuple[str, list[dict[str, Any]]]:

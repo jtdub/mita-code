@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mita.agent.conversation import Conversation, Message, Role
-from mita.agent.loop import MAX_ITERATIONS, _extract_delta, _parse_response, run_agent
+from mita.agent.loop import (
+    MAX_ITERATIONS,
+    _accumulate_tool_call_deltas,
+    _extract_delta,
+    _parse_response,
+    run_agent,
+)
 from mita.config.schema import MitaConfig
 from mita.tools.registry import create_default_registry
 
@@ -54,6 +61,90 @@ class TestParseResponse:
         text, calls = _parse_response({})
         assert text == ""
         assert calls == []
+
+
+class TestAccumulateToolCallDeltas:
+    def test_accumulate_object_style(self) -> None:
+        """Accumulate tool call deltas from object-style streaming chunks."""
+
+        class Func:
+            name = "file_read"
+            arguments = '{"path":'
+
+        class ToolCallDelta:
+            index = 0
+            id = "tc_1"
+            function = Func()
+
+        class Delta:
+            content = None
+            tool_calls = [ToolCallDelta()]
+
+        class Choice:
+            delta = Delta()
+
+        class Chunk:
+            choices = [Choice()]
+
+        acc: dict[int, dict[str, Any]] = {}
+        _accumulate_tool_call_deltas(Chunk(), acc)
+
+        assert 0 in acc
+        assert acc[0]["id"] == "tc_1"
+        assert acc[0]["function"]["name"] == "file_read"
+        assert acc[0]["function"]["arguments"] == '{"path":'
+
+        # Second chunk appends arguments
+        class Func2:
+            name = None
+            arguments = '"/tmp"}'
+
+        class ToolCallDelta2:
+            index = 0
+            id = None
+            function = Func2()
+
+        class Delta2:
+            content = None
+            tool_calls = [ToolCallDelta2()]
+
+        class Choice2:
+            delta = Delta2()
+
+        class Chunk2:
+            choices = [Choice2()]
+
+        _accumulate_tool_call_deltas(Chunk2(), acc)
+        assert acc[0]["function"]["arguments"] == '{"path":"/tmp"}'
+
+    def test_accumulate_dict_style(self) -> None:
+        """Accumulate tool call deltas from dict-style streaming chunks."""
+        acc: dict[int, dict[str, Any]] = {}
+        chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "tc_2",
+                                "function": {"name": "shell", "arguments": '{"cmd":'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        _accumulate_tool_call_deltas(chunk, acc)
+        assert acc[0]["function"]["name"] == "shell"
+
+    def test_empty_chunk_no_error(self) -> None:
+        """Empty chunks should be silently ignored."""
+        acc: dict[int, dict[str, Any]] = {}
+        _accumulate_tool_call_deltas({}, acc)
+        assert acc == {}
+        _accumulate_tool_call_deltas({"choices": []}, acc)
+        assert acc == {}
 
 
 class TestRunAgent:

@@ -15,12 +15,14 @@ from mita.ui.display import display_goodbye, display_welcome
 async def repl_loop(
     console: Console,
     on_input: Callable[[str], Coroutine[Any, Any, None]],
+    on_clear: Callable[[], None] | None = None,
 ) -> None:
     """Run the interactive REPL.
 
     Args:
         console: Rich console for output.
         on_input: Async callback called with each user input line.
+        on_clear: Callback invoked when the user types /clear.
     """
     display_welcome(console)
 
@@ -42,6 +44,8 @@ async def repl_loop(
             break
 
         if user_input.lower() == "/clear":
+            if on_clear is not None:
+                on_clear()
             console.print("[mita.dim]Conversation cleared.[/mita.dim]")
             continue
 
