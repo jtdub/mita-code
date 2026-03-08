@@ -23,14 +23,23 @@ def _get_client() -> OllamaClient:
 
 
 def _check_ollama(client: OllamaClient) -> bool:
-    """Check if Ollama is running, print error if not."""
-    if not client.is_running():
-        console.print(
-            "[red]Cannot connect to Ollama.[/red]\n"
-            "Make sure Ollama is running: [bold]ollama serve[/bold]"
-        )
-        return False
-    return True
+    """Check if Ollama is running, auto-start if configured."""
+    if client.is_running():
+        return True
+
+    # Try auto-start if configured
+    cfg = load_config()
+    if cfg.ollama.auto_manage:
+        from mita.models.server import ensure_server
+
+        if ensure_server(host=cfg.ollama.host, auto_manage=True, console=console):
+            return True
+
+    console.print(
+        "[red]Cannot connect to Ollama.[/red]\n"
+        "Make sure Ollama is running: [bold]ollama serve[/bold]"
+    )
+    return False
 
 
 def list_models() -> None:

@@ -10,6 +10,7 @@ class OllamaSettings(BaseModel):
 
     host: str = "http://localhost:11434"
     timeout: int = 120
+    auto_manage: bool = True
 
 
 class ModelSettings(BaseModel):
