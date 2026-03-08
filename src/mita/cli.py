@@ -263,6 +263,48 @@ def index_clear() -> None:
     asyncio.run(clear_index())
 
 
+# ── Skills commands ───────────────────────────────────────────────
+
+skills_app = typer.Typer(help="Skills management.")
+app.add_typer(skills_app, name="skills")
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    """List all available skills."""
+    from mita.skills.manager import list_skills
+
+    list_skills()
+
+
+@skills_app.command("show")
+def skills_show(
+    name: Annotated[str, typer.Argument(help="Skill name to show.")],
+) -> None:
+    """Show details about a skill."""
+    from mita.skills.manager import show_skill
+
+    show_skill(name)
+
+
+@skills_app.command("create")
+def skills_create(
+    name: Annotated[str, typer.Argument(help="Name for the new skill.")],
+) -> None:
+    """Create a new skill from a template."""
+    from mita.skills.manager import create_skill
+
+    create_skill(name)
+
+
+@skills_app.command("path")
+def skills_path() -> None:
+    """Show skill search paths."""
+    from mita.skills.manager import show_paths
+
+    show_paths()
+
+
 # ── Chat / Ask commands ───────────────────────────────────────────
 
 
@@ -289,7 +331,7 @@ def chat_command() -> None:
         nonlocal conversation
         conversation.clear_non_system()
 
-    asyncio.run(repl_loop(chat_console, on_input, on_clear=on_clear))
+    asyncio.run(repl_loop(chat_console, on_input, on_clear=on_clear, skills_paths=cfg.skills_paths))
 
 
 @app.command("ask")
