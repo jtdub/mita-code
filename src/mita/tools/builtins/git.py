@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 from typing import Any
 
 from mita.tools.schema import ToolDefinition, ToolParameter, ToolResult
@@ -23,7 +24,7 @@ TOOL_DEF = ToolDefinition(
             ),
         ),
     ],
-    destructive=True,  # Some git ops are destructive; safety module handles details
+    destructive=False,  # Per-command destructiveness handled by is_safe_git_command
 )
 
 # Git subcommands that are always safe (read-only)
@@ -36,7 +37,7 @@ SAFE_SUBCOMMANDS = frozenset(
         "branch",
         "remote",
         "tag",
-        "stash list",
+        "stash",
         "ls-files",
         "rev-parse",
         "describe",
@@ -44,14 +45,14 @@ SAFE_SUBCOMMANDS = frozenset(
 )
 
 
-def _is_safe_git_command(subcommand: str) -> bool:
+def is_safe_git_command(subcommand: str) -> bool:
     """Check if a git subcommand is read-only."""
     first_word = subcommand.strip().split()[0] if subcommand.strip() else ""
     return first_word in SAFE_SUBCOMMANDS
 
 
 async def execute(args: dict[str, Any]) -> ToolResult:
-    """Execute a git subcommand."""
+    """Execute a git subcommand using subprocess_exec (no shell injection)."""
     subcommand = str(args.get("subcommand", ""))
 
     if not subcommand:
@@ -61,20 +62,29 @@ async def execute(args: dict[str, Any]) -> ToolResult:
             error="Missing required parameter: subcommand",
         )
 
-    full_command = f"git {subcommand}"
+    # Use shlex.split to safely tokenize, then prepend "git"
+    try:
+        cmd_parts = ["git", *shlex.split(subcommand)]
+    except ValueError as e:
+        return ToolResult(
+            tool_call_id="",
+            success=False,
+            error=f"Invalid subcommand syntax: {e}",
+        )
 
     try:
-        proc = await asyncio.create_subprocess_shell(
-            full_command,
+        proc = await asyncio.create_subprocess_exec(
+            *cmd_parts,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=30)
     except TimeoutError:
+        proc.kill()
         return ToolResult(
             tool_call_id="",
             success=False,
-            error=f"Git command timed out: {full_command}",
+            error=f"Git command timed out: git {subcommand}",
         )
     except OSError as e:
         return ToolResult(tool_call_id="", success=False, error=f"Failed to run git: {e}")

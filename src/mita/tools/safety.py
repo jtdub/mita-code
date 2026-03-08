@@ -17,6 +17,16 @@ DESTRUCTIVE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r">\s*/dev/\w+", re.IGNORECASE),
 ]
 
+# Git subcommands that are destructive and need confirmation
+DESTRUCTIVE_GIT_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"^push\s+--force", re.IGNORECASE),
+    re.compile(r"^push\s+-f\b", re.IGNORECASE),
+    re.compile(r"^reset\s+--hard", re.IGNORECASE),
+    re.compile(r"^clean\s+-[a-zA-Z]*f", re.IGNORECASE),
+    re.compile(r"^checkout\s+--\s", re.IGNORECASE),
+    re.compile(r"^branch\s+-[dD]\b", re.IGNORECASE),
+]
+
 
 def is_command_banned(command: str, banned_commands: list[str]) -> bool:
     """Check if a shell command matches any banned command pattern."""
@@ -35,6 +45,15 @@ def is_command_destructive(command: str) -> bool:
     return False
 
 
+def is_git_command_destructive(subcommand: str) -> bool:
+    """Check if a git subcommand is destructive."""
+    stripped = subcommand.strip()
+    for pattern in DESTRUCTIVE_GIT_PATTERNS:
+        if pattern.search(stripped):
+            return True
+    return False
+
+
 def needs_confirmation(
     tool_call: ToolCall,
     tool_def: ToolDefinition,
@@ -46,6 +65,7 @@ def needs_confirmation(
     - The tool is marked destructive AND confirm_destructive is on
       AND the tool is not in auto_approve.
     - Or the tool is 'shell' and the command looks destructive.
+    - Or the tool is 'git' and the subcommand is destructive.
     """
     if not settings.confirm_destructive:
         return False
@@ -60,6 +80,12 @@ def needs_confirmation(
     if tool_call.name == "shell":
         command = tool_call.arguments.get("command", "")
         if is_command_destructive(command):
+            return True
+
+    # Check git subcommands for destructive operations
+    if tool_call.name == "git":
+        subcommand = tool_call.arguments.get("subcommand", "")
+        if is_git_command_destructive(subcommand):
             return True
 
     return False

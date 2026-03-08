@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from mita.config.schema import ToolSettings
-from mita.tools.safety import is_command_banned, is_command_destructive, needs_confirmation
+from mita.tools.safety import (
+    is_command_banned,
+    is_command_destructive,
+    is_git_command_destructive,
+    needs_confirmation,
+)
 from mita.tools.schema import ToolCall, ToolDefinition
 
 
@@ -91,3 +96,47 @@ class TestNeedsConfirmation:
             name="shell", description="shell", parameters=[], destructive=False
         )
         assert needs_confirmation(call, tool_def, settings) is True
+
+    def test_git_destructive_subcommand_needs_confirm(self) -> None:
+        settings = ToolSettings()
+        call = ToolCall(id="1", name="git", arguments={"subcommand": "push --force"})
+        tool_def = ToolDefinition(name="git", description="git", parameters=[], destructive=False)
+        assert needs_confirmation(call, tool_def, settings) is True
+
+    def test_git_safe_subcommand_no_confirm(self) -> None:
+        settings = ToolSettings()
+        call = ToolCall(id="1", name="git", arguments={"subcommand": "status"})
+        tool_def = ToolDefinition(name="git", description="git", parameters=[], destructive=False)
+        assert needs_confirmation(call, tool_def, settings) is False
+
+
+class TestIsGitCommandDestructive:
+    @pytest.mark.parametrize(
+        "subcmd",
+        [
+            "push --force origin main",
+            "push -f",
+            "reset --hard HEAD~1",
+            "clean -fd",
+            "checkout -- .",
+            "branch -D feature",
+            "branch -d feature",
+        ],
+    )
+    def test_destructive_git_commands(self, subcmd: str) -> None:
+        assert is_git_command_destructive(subcmd) is True
+
+    @pytest.mark.parametrize(
+        "subcmd",
+        [
+            "status",
+            "diff",
+            "log --oneline -10",
+            "add .",
+            "commit -m 'test'",
+            "push origin main",
+            "branch feature",
+        ],
+    )
+    def test_safe_git_commands(self, subcmd: str) -> None:
+        assert is_git_command_destructive(subcmd) is False

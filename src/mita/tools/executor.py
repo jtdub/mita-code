@@ -31,7 +31,7 @@ async def execute_tool(
             error=f"Unknown tool: {tool_call.name}",
         )
 
-    # Check for banned commands (shell tool)
+    # Check for banned commands (shell and git tools)
     if tool_call.name == "shell":
         command = tool_call.arguments.get("command", "")
         if is_command_banned(command, settings.banned_commands):
@@ -39,6 +39,14 @@ async def execute_tool(
                 tool_call_id=tool_call.id,
                 success=False,
                 error=f"Command is banned by configuration: {command}",
+            )
+    if tool_call.name == "git":
+        subcommand = tool_call.arguments.get("subcommand", "")
+        if is_command_banned(f"git {subcommand}", settings.banned_commands):
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                success=False,
+                error=f"Git command is banned by configuration: git {subcommand}",
             )
 
     # Confirmation flow

@@ -9,16 +9,23 @@ import litellm
 from pydantic import BaseModel
 
 from mita.config.schema import MitaConfig
-from mita.tools.schema import ToolCall
 
 T = TypeVar("T", bound=BaseModel)
+
+
+class ParsedToolCall(BaseModel):
+    """A tool call parsed from LLM output (llm-local model, no tools dependency)."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
 
 
 class ToolCallResponse(BaseModel):
     """Structured response containing tool calls parsed from LLM output."""
 
     reasoning: str = ""
-    tool_calls: list[ToolCall] = []
+    tool_calls: list[ParsedToolCall] = []
     text_response: str = ""
 
 

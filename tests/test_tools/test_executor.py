@@ -29,6 +29,10 @@ def registry() -> ToolRegistry:
         ToolDefinition(name="shell", description="shell", parameters=[], destructive=True),
         _echo_handler,
     )
+    reg.register(
+        ToolDefinition(name="git", description="git", parameters=[], destructive=False),
+        _echo_handler,
+    )
     return reg
 
 
@@ -87,4 +91,18 @@ class TestExecuteTool:
         call = ToolCall(id="1", name="danger_tool", arguments={})
         settings = ToolSettings(auto_approve=["danger_tool"])
         result = await execute_tool(call, registry, settings)
+        assert result.success is True
+
+    @pytest.mark.asyncio()
+    async def test_git_banned_command_blocked(self, registry: ToolRegistry) -> None:
+        call = ToolCall(id="1", name="git", arguments={"subcommand": "push --force"})
+        settings = ToolSettings(banned_commands=["git push --force"])
+        result = await execute_tool(call, registry, settings)
+        assert result.success is False
+        assert "banned" in (result.error or "").lower()
+
+    @pytest.mark.asyncio()
+    async def test_git_safe_command_executes(self, registry: ToolRegistry) -> None:
+        call = ToolCall(id="1", name="git", arguments={"subcommand": "status"})
+        result = await execute_tool(call, registry, ToolSettings())
         assert result.success is True
