@@ -62,6 +62,24 @@ async def run_agent(
     # Add user message
     conversation.add(Message(role=Role.USER, content=user_prompt))
 
+    # Inject RAG context if index is available
+    if config.index.enabled:
+        try:
+            from mita.index.retriever import Retriever
+
+            retriever = Retriever(config)
+            if retriever.is_available():
+                rag_context = await retriever.retrieve_formatted(user_prompt)
+                if rag_context:
+                    conversation.add(
+                        Message(
+                            role=Role.SYSTEM,
+                            content=f"Relevant code from the project index:\n{rag_context}",
+                        )
+                    )
+        except Exception:  # noqa: BLE001
+            pass  # Index unavailable; proceed without RAG
+
     # Agent loop
     for iteration in range(MAX_ITERATIONS):
         # Truncate to fit context window

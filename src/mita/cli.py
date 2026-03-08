@@ -192,6 +192,57 @@ def models_hardware() -> None:
     show_hardware()
 
 
+# ── Index commands ────────────────────────────────────────────────
+
+index_app = typer.Typer(help="Codebase index management.")
+app.add_typer(index_app, name="index")
+
+
+@index_app.command("build")
+def index_build(
+    force: Annotated[bool, typer.Option("--force", "-f", help="Force rebuild the index.")] = False,
+) -> None:
+    """Build the codebase index."""
+    import asyncio
+
+    from mita.index.manager import build_index
+
+    asyncio.run(build_index(force=force))
+
+
+@index_app.command("status")
+def index_status() -> None:
+    """Show index statistics."""
+    import asyncio
+
+    from mita.index.manager import show_index_status
+
+    asyncio.run(show_index_status())
+
+
+@index_app.command("search")
+def index_search(
+    query: Annotated[str, typer.Argument(help="Search query.")],
+    top_k: Annotated[int, typer.Option("--top-k", "-k", help="Number of results.")] = 10,
+) -> None:
+    """Search the codebase index."""
+    import asyncio
+
+    from mita.index.manager import search_index
+
+    asyncio.run(search_index(query, top_k=top_k))
+
+
+@index_app.command("clear")
+def index_clear() -> None:
+    """Delete the codebase index."""
+    import asyncio
+
+    from mita.index.manager import clear_index
+
+    asyncio.run(clear_index())
+
+
 # ── Chat / Ask commands ───────────────────────────────────────────
 
 
