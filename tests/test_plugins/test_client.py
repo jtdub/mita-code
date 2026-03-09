@@ -36,29 +36,26 @@ class TestMCPPluginClient:
         assert client.transport == "stdio"
         assert not client.connected
 
-    def test_missing_command_raises(self) -> None:
+    @pytest.mark.asyncio
+    async def test_missing_command_raises(self) -> None:
         plugin = PluginDefinition(name="bad", transport="stdio")
         client = MCPPluginClient(plugin)
         with pytest.raises(ValueError, match="requires a command"):
-            import asyncio
+            await client.connect()
 
-            asyncio.get_event_loop().run_until_complete(client.connect())
-
-    def test_missing_url_raises(self) -> None:
+    @pytest.mark.asyncio
+    async def test_missing_url_raises(self) -> None:
         plugin = PluginDefinition(name="bad", transport="sse")
         client = MCPPluginClient(plugin)
         with pytest.raises(ValueError, match="requires a url"):
-            import asyncio
+            await client.connect()
 
-            asyncio.get_event_loop().run_until_complete(client.connect())
-
-    def test_unsupported_transport_raises(self) -> None:
+    @pytest.mark.asyncio
+    async def test_unsupported_transport_raises(self) -> None:
         plugin = PluginDefinition(name="bad", transport="grpc")
         client = MCPPluginClient(plugin)
         with pytest.raises(ValueError, match="Unsupported transport"):
-            import asyncio
-
-            asyncio.get_event_loop().run_until_complete(client.connect())
+            await client.connect()
 
     @pytest.mark.asyncio
     async def test_list_tools_not_connected(self, stdio_plugin: PluginDefinition) -> None:

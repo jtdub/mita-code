@@ -58,10 +58,16 @@ async def repl_loop(
         if user_input.startswith("/") and user_input.split()[0].lower() not in _BUILTIN_COMMANDS:
             rendered = _try_render_skill(user_input, skills_paths or [], console)
             if rendered is not None:
-                await on_input(rendered)
+                try:
+                    await on_input(rendered)
+                except KeyboardInterrupt:
+                    console.print("\n[Interrupted]")
                 continue
 
-        await on_input(user_input)
+        try:
+            await on_input(user_input)
+        except KeyboardInterrupt:
+            console.print("\n[Interrupted]")
 
 
 def _try_render_skill(user_input: str, skills_paths: list[str], console: Console) -> str | None:

@@ -119,6 +119,12 @@ def display_response_stats(
     console.print(f"[mita.token_count]({' · '.join(parts)})[/mita.token_count]")
 
 
+def display_error_with_suggestion(console: Console, error: str, suggestion: str) -> None:
+    """Display an error with an actionable suggestion."""
+    console.print(f"[red]{error}[/red]")
+    console.print(f"[dim]  → {suggestion}[/dim]")
+
+
 async def prompt_user_confirm(console: Console, question: str) -> bool:
     """Ask the user for confirmation before a destructive action.
 

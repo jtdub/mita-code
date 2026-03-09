@@ -269,3 +269,62 @@ class TestExtractToolCallsFromText:
         calls, remaining = _extract_tool_calls_from_text("", registry)
         assert len(calls) == 0
         assert remaining == ""
+
+
+class TestKeyboardInterrupt:
+    @pytest.mark.asyncio()
+    async def test_interrupt_during_llm_call(self) -> None:
+        """KeyboardInterrupt during LLM call is caught and loop exits."""
+        config = MitaConfig()
+        config.ui.stream = False
+        mock_console = MagicMock()
+        mock_console.print = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.chat = AsyncMock(side_effect=KeyboardInterrupt)
+
+        registry = create_default_registry()
+
+        with patch("mita.agent.loop.assemble_context"):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent(
+                "test",
+                config,
+                mock_console,
+                conversation=conv,
+                registry=registry,
+                llm_client=mock_client,
+            )
+
+        # Should have user message but loop should have exited gracefully
+        user_msgs = [m for m in result.messages if m.role == Role.USER]
+        assert len(user_msgs) == 1
+
+    @pytest.mark.asyncio()
+    async def test_interrupt_preserves_conversation(self) -> None:
+        """After KeyboardInterrupt, the conversation is returned."""
+        config = MitaConfig()
+        config.ui.stream = False
+        mock_console = MagicMock()
+        mock_console.print = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.chat = AsyncMock(side_effect=KeyboardInterrupt)
+
+        registry = create_default_registry()
+
+        with patch("mita.agent.loop.assemble_context"):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent(
+                "test prompt",
+                config,
+                mock_console,
+                conversation=conv,
+                registry=registry,
+                llm_client=mock_client,
+            )
+
+        assert isinstance(result, Conversation)
+        assert len(result.messages) >= 2  # system + user at minimum
