@@ -1,5 +1,11 @@
 # Mita Code
 
+[![CI](https://github.com/jtdub/mita-code/actions/workflows/ci.yml/badge.svg)](https://github.com/jtdub/mita-code/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/mita-code)](https://pypi.org/project/mita-code/)
+[![Python](https://img.shields.io/pypi/pyversions/mita-code)](https://pypi.org/project/mita-code/)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Docs](https://readthedocs.org/projects/mita-code/badge/?version=latest)](https://mita-code.readthedocs.io/)
+
 A local-first, terminal-native agentic coding assistant that runs LLMs entirely on your machine via [Ollama](https://ollama.com). No API keys. No cloud. No telemetry.
 
 ## Features
@@ -31,7 +37,7 @@ Or for development:
 ```bash
 git clone https://github.com/jtdub/mita-code.git
 cd mita-code
-pip install -e ".[dev]"
+poetry install
 ```
 
 ## Quick Start
@@ -170,6 +176,8 @@ Higher-specificity files take priority. Each file is capped at 200 lines.
 ## Contributing
 
 See [PLANNING.md](PLANNING.md) for the full project plan, architecture, and build phases.
+
+Full documentation is available at [mita-code.readthedocs.io](https://mita-code.readthedocs.io/).
 
 ## License
 

@@ -55,6 +55,8 @@ nav:
       - Memory System: guide/memory.md
       - Codebase Indexing: guide/indexing.md
       - Skills: guide/skills.md
+      - Plugins (MCP): guide/plugins.md
+      - Hooks: guide/hooks.md
       - Configuration: guide/configuration.md
       - Apple Silicon: guide/apple-silicon.md
   - Reference:
