@@ -12,11 +12,13 @@ from mita.agent.loop import (
     MAX_ITERATIONS,
     _accumulate_tool_call_deltas,
     _extract_delta,
+    _extract_tool_calls_from_text,
     _parse_response,
     run_agent,
 )
 from mita.config.schema import MitaConfig
-from mita.tools.registry import create_default_registry
+from mita.tools.registry import ToolRegistry, create_default_registry
+from mita.tools.schema import ToolDefinition, ToolParameter, ToolResult
 
 
 class TestExtractDelta:
@@ -194,3 +196,76 @@ class TestRunAgent:
     @pytest.mark.asyncio()
     async def test_max_iterations_constant(self) -> None:
         assert MAX_ITERATIONS == 25
+
+
+def _make_registry_with_tool(name: str) -> ToolRegistry:
+    """Create a registry with a single dummy tool for testing text extraction."""
+    registry = ToolRegistry()
+
+    async def dummy_handler(args: dict[str, Any]) -> ToolResult:
+        return ToolResult(tool_call_id="test", success=True, output="ok")
+
+    registry.register(
+        ToolDefinition(
+            name=name,
+            description="test tool",
+            parameters=[
+                ToolParameter(name="path", type="string", description="file path"),
+            ],
+        ),
+        dummy_handler,
+    )
+    return registry
+
+
+class TestExtractToolCallsFromText:
+    def test_bare_json_tool_call(self) -> None:
+        registry = _make_registry_with_tool("file_write")
+        text = '{"name": "file_write", "arguments": {"path": "hello.py"}}'
+        calls, remaining = _extract_tool_calls_from_text(text, registry)
+        assert len(calls) == 1
+        assert calls[0]["function"]["name"] == "file_write"
+        assert remaining == ""
+
+    def test_fenced_json_tool_call(self) -> None:
+        registry = _make_registry_with_tool("shell")
+        text = '```json\n{"name": "shell", "arguments": {"command": "ls"}}\n```'
+        calls, remaining = _extract_tool_calls_from_text(text, registry)
+        assert len(calls) == 1
+        assert calls[0]["function"]["name"] == "shell"
+
+    def test_text_with_tool_call(self) -> None:
+        registry = _make_registry_with_tool("file_write")
+        text = (
+            "I'll create the file for you.\n"
+            '{"name": "file_write", "arguments": {"path": "test.py"}}\n'
+        )
+        calls, remaining = _extract_tool_calls_from_text(text, registry)
+        assert len(calls) == 1
+        assert "create the file" in remaining
+
+    def test_unknown_tool_not_extracted(self) -> None:
+        registry = _make_registry_with_tool("file_write")
+        text = '{"name": "unknown_tool", "arguments": {"foo": "bar"}}'
+        calls, remaining = _extract_tool_calls_from_text(text, registry)
+        assert len(calls) == 0
+        assert remaining == text
+
+    def test_plain_text_no_extraction(self) -> None:
+        registry = _make_registry_with_tool("file_write")
+        text = "Here is how to create a file."
+        calls, remaining = _extract_tool_calls_from_text(text, registry)
+        assert len(calls) == 0
+        assert remaining == text
+
+    def test_invalid_json_ignored(self) -> None:
+        registry = _make_registry_with_tool("file_write")
+        text = '{"name": "file_write", "arguments": {invalid}}'
+        calls, remaining = _extract_tool_calls_from_text(text, registry)
+        assert len(calls) == 0
+
+    def test_empty_text(self) -> None:
+        registry = _make_registry_with_tool("file_write")
+        calls, remaining = _extract_tool_calls_from_text("", registry)
+        assert len(calls) == 0
+        assert remaining == ""

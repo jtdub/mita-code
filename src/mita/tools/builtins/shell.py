@@ -67,7 +67,9 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     if stderr:
         output_parts.append(f"STDERR:\n{stderr}")
 
-    output = "\n".join(output_parts) if output_parts else "(no output)"
+    output = (
+        "\n".join(output_parts) if output_parts else "Command completed successfully (no output)."
+    )
     exit_code = proc.returncode or 0
 
     if exit_code != 0:

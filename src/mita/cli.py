@@ -305,6 +305,42 @@ def skills_path() -> None:
     show_paths()
 
 
+# ── Hook commands ─────────────────────────────────────────────────
+
+hooks_app = typer.Typer(help="Lifecycle hooks management.")
+app.add_typer(hooks_app, name="hooks")
+
+
+@hooks_app.command("list")
+def hooks_list() -> None:
+    """List configured hooks."""
+    from mita.hooks.manager import list_hooks
+
+    list_hooks()
+
+
+@hooks_app.command("add")
+def hooks_add(
+    event: Annotated[str, typer.Argument(help="Hook event (e.g. on_file_write).")],
+    command: Annotated[str, typer.Argument(help="Shell command to run.")],
+    match: Annotated[str | None, typer.Option("--match", "-m", help="Glob pattern filter.")] = None,
+) -> None:
+    """Add a hook to project config."""
+    from mita.hooks.manager import add_hook
+
+    add_hook(event, command, match)
+
+
+@hooks_app.command("remove")
+def hooks_remove(
+    event: Annotated[str, typer.Argument(help="Hook event to remove.")],
+) -> None:
+    """Remove hooks for an event from project config."""
+    from mita.hooks.manager import remove_hooks
+
+    remove_hooks(event)
+
+
 # ── Plugin commands ───────────────────────────────────────────────
 
 plugins_app = typer.Typer(help="MCP plugin management.")
@@ -552,17 +588,42 @@ def chat_command() -> None:
     ):
         raise typer.Exit(1)
 
+    from mita.plugins.manager import PluginManager
+    from mita.tools.registry import create_default_registry
+
     conversation = Conversation()
+    registry = create_default_registry()
 
-    async def on_input(user_input: str) -> None:
+    async def _run_chat() -> None:
         nonlocal conversation
-        conversation = await run_agent(user_input, cfg, chat_console, conversation=conversation)
 
-    def on_clear() -> None:
-        nonlocal conversation
-        conversation.clear_non_system()
+        # Start MCP plugins at session level (not per-call)
+        plugin_mgr: PluginManager | None = None
+        if cfg.plugins:
+            plugin_mgr = PluginManager(cfg.plugins)
+            await plugin_mgr.start_all(console=chat_console)
+            await plugin_mgr.register_tools_async(registry)
 
-    asyncio.run(repl_loop(chat_console, on_input, on_clear=on_clear, skills_paths=cfg.skills_paths))
+        try:
+
+            async def on_input(user_input: str) -> None:
+                nonlocal conversation
+                conversation = await run_agent(
+                    user_input, cfg, chat_console, conversation=conversation, registry=registry
+                )
+
+            def on_clear() -> None:
+                nonlocal conversation
+                conversation.clear_non_system()
+
+            await repl_loop(
+                chat_console, on_input, on_clear=on_clear, skills_paths=cfg.skills_paths
+            )
+        finally:
+            if plugin_mgr is not None:
+                await plugin_mgr.stop_all()
+
+    asyncio.run(_run_chat())
 
 
 @app.command("ask")
@@ -590,7 +651,25 @@ def ask_command(
     ):
         raise typer.Exit(1)
 
-    asyncio.run(run_agent(prompt, cfg, ask_console))
+    async def _run_ask() -> None:
+        from mita.plugins.manager import PluginManager
+        from mita.tools.registry import create_default_registry
+
+        registry = create_default_registry()
+
+        plugin_mgr: PluginManager | None = None
+        if cfg.plugins:
+            plugin_mgr = PluginManager(cfg.plugins)
+            await plugin_mgr.start_all(console=ask_console)
+            await plugin_mgr.register_tools_async(registry)
+
+        try:
+            await run_agent(prompt, cfg, ask_console, registry=registry)
+        finally:
+            if plugin_mgr is not None:
+                await plugin_mgr.stop_all()
+
+    asyncio.run(_run_ask())
 
 
 # ── Helpers ───────────────────────────────────────────────────────
