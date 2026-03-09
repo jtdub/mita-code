@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, TextColumn
+from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TransferSpeedColumn
 from rich.table import Table
 
 from mita.config.loader import load_config
@@ -23,14 +23,23 @@ def _get_client() -> OllamaClient:
 
 
 def _check_ollama(client: OllamaClient) -> bool:
-    """Check if Ollama is running, print error if not."""
-    if not client.is_running():
-        console.print(
-            "[red]Cannot connect to Ollama.[/red]\n"
-            "Make sure Ollama is running: [bold]ollama serve[/bold]"
-        )
-        return False
-    return True
+    """Check if Ollama is running, auto-start if configured."""
+    if client.is_running():
+        return True
+
+    # Try auto-start if configured
+    cfg = load_config()
+    if cfg.ollama.auto_manage:
+        from mita.models.server import ensure_server
+
+        if ensure_server(host=cfg.ollama.host, auto_manage=True, console=console):
+            return True
+
+    console.print(
+        "[red]Cannot connect to Ollama.[/red]\n"
+        "Make sure Ollama is running: [bold]ollama serve[/bold]"
+    )
+    return False
 
 
 def list_models() -> None:
@@ -80,10 +89,11 @@ def pull_model(name: str) -> None:
         with Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
-            TextColumn("{task.percentage:>3.0f}%"),
+            DownloadColumn(),
+            TransferSpeedColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task("Downloading", total=100)
+            task = progress.add_task("Downloading", total=None)
 
             for update in client.pull(name, stream=True):
                 status = update.get("status", "")
@@ -91,12 +101,11 @@ def pull_model(name: str) -> None:
                 total = update.get("total", 0)
 
                 if total > 0:
-                    pct = (completed / total) * 100
-                    progress.update(task, completed=pct, description=status)
+                    progress.update(task, completed=completed, total=total, description=status)
                 else:
                     progress.update(task, description=status)
 
-            progress.update(task, completed=100)
+            progress.update(task, description="Complete")
 
         console.print(f"[green]Successfully pulled {name}[/green]")
     except ollama_lib.ResponseError as e:

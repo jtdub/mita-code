@@ -90,8 +90,33 @@ def display_warning(console: Console, message: str) -> None:
 
 
 def display_token_usage(console: Console, total_tokens: int) -> None:
-    """Display token usage after a response."""
+    """Display token usage after a response (estimated)."""
     console.print(f"[mita.token_count]({total_tokens:,} tokens)[/mita.token_count]")
+
+
+def display_response_stats(
+    console: Console,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_time: float,
+    ttft: float | None = None,
+) -> None:
+    """Display detailed response statistics after an LLM call."""
+    parts: list[str] = []
+
+    parts.append(f"prompt: {prompt_tokens:,}")
+    parts.append(f"completion: {completion_tokens:,}")
+
+    if ttft is not None:
+        parts.append(f"ttft: {ttft:.1f}s")
+
+    parts.append(f"total: {total_time:.1f}s")
+
+    if completion_tokens > 0 and total_time > 0:
+        tps = completion_tokens / total_time
+        parts.append(f"{tps:.1f} tok/s")
+
+    console.print(f"[mita.token_count]({' · '.join(parts)})[/mita.token_count]")
 
 
 async def prompt_user_confirm(console: Console, question: str) -> bool:

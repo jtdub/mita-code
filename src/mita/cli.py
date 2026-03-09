@@ -305,6 +305,60 @@ def skills_path() -> None:
     show_paths()
 
 
+# ── Ollama server commands ────────────────────────────────────────
+
+ollama_app = typer.Typer(help="Ollama server management.")
+app.add_typer(ollama_app, name="ollama")
+
+
+@ollama_app.command("start")
+def ollama_start() -> None:
+    """Start the Ollama server in the background."""
+    from mita.models.server import is_server_running, start_server
+
+    cfg = load_config()
+    if is_server_running(cfg.ollama.host):
+        console.print("[green]Ollama is already running.[/green]")
+        return
+
+    if not start_server(host=cfg.ollama.host, console=console):
+        raise typer.Exit(1)
+
+
+@ollama_app.command("stop")
+def ollama_stop() -> None:
+    """Stop the Ollama server (only if started by Mita)."""
+    from mita.models.server import is_managed, stop_server
+
+    if not is_managed():
+        console.print("[yellow]Ollama was not started by Mita — not stopping.[/yellow]")
+        return
+
+    stop_server(console=console)
+
+
+@ollama_app.command("status")
+def ollama_status() -> None:
+    """Show Ollama server status."""
+    from mita.models.server import find_ollama_binary, is_managed, is_server_running
+
+    cfg = load_config()
+
+    binary = find_ollama_binary()
+    console.print(f"  Binary: {binary or '[red]not found[/red]'}")
+    console.print(f"  Host:   {cfg.ollama.host}")
+
+    running = is_server_running(cfg.ollama.host)
+    if running:
+        managed = is_managed()
+        label = "running (managed by Mita)" if managed else "running"
+        console.print(f"  Status: [green]{label}[/green]")
+    else:
+        console.print("  Status: [red]not running[/red]")
+
+    console.print(f"  Auto-manage: {'yes' if cfg.ollama.auto_manage else 'no'}")
+
+
 # ── Chat / Ask commands ───────────────────────────────────────────
 
 
@@ -316,11 +370,23 @@ def chat_command() -> None:
     from mita.agent.conversation import Conversation
     from mita.agent.loop import run_agent
     from mita.config.loader import load_config as _load_config
+    from mita.models.server import ensure_model, ensure_server
     from mita.ui.display import get_console
     from mita.ui.repl import repl_loop
 
     cfg = _load_config()
     chat_console = get_console()
+
+    if not ensure_server(
+        host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=chat_console
+    ):
+        raise typer.Exit(1)
+
+    if not ensure_model(
+        cfg.model.default, host=cfg.ollama.host, timeout=cfg.ollama.timeout, console=chat_console
+    ):
+        raise typer.Exit(1)
+
     conversation = Conversation()
 
     async def on_input(user_input: str) -> None:
@@ -343,10 +409,22 @@ def ask_command(
 
     from mita.agent.loop import run_agent
     from mita.config.loader import load_config as _load_config
+    from mita.models.server import ensure_model, ensure_server
     from mita.ui.display import get_console
 
     cfg = _load_config()
     ask_console = get_console()
+
+    if not ensure_server(
+        host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=ask_console
+    ):
+        raise typer.Exit(1)
+
+    if not ensure_model(
+        cfg.model.default, host=cfg.ollama.host, timeout=cfg.ollama.timeout, console=ask_console
+    ):
+        raise typer.Exit(1)
+
     asyncio.run(run_agent(prompt, cfg, ask_console))
 
 

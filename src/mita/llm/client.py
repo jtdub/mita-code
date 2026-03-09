@@ -19,6 +19,7 @@ class LLMClient:
         self._temperature = config.model.temperature
         self._max_tokens = config.model.max_tokens
         self._stream = config.ui.stream
+        self._ollama_options = config.model.ollama_options.to_api_dict()
 
         # Suppress LiteLLM's verbose logging
         litellm.suppress_debug_info = True
@@ -46,6 +47,8 @@ class LLMClient:
         }
         if tools:
             kwargs["tools"] = tools
+        if self._ollama_options:
+            kwargs["extra_body"] = {"options": self._ollama_options}
 
         response = await litellm.acompletion(**kwargs)
         return response  # type: ignore[no-any-return]
@@ -66,9 +69,12 @@ class LLMClient:
             "max_tokens": self._max_tokens,
             "api_base": self._api_base,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if tools:
             kwargs["tools"] = tools
+        if self._ollama_options:
+            kwargs["extra_body"] = {"options": self._ollama_options}
 
         response = await litellm.acompletion(**kwargs)
         async for chunk in response:
