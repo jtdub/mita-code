@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import time
 import uuid
 from typing import Any
@@ -96,20 +98,19 @@ async def run_agent(
         await run_hooks("session_start", config.hooks, console=console)
 
     # Agent loop
+    last_tool_signature: str | None = None
+    repeat_count = 0
     for iteration in range(MAX_ITERATIONS):
         # Truncate to fit context window
         conversation.truncate_to_fit(config.model.context_window)
 
-        # Call LLM
-        # Tools are described in the system prompt — don't also pass JSON schemas
-        # via the `tools` parameter, as native function calling is much slower
-        # on local models. (See CLAUDE.md: "Instructor JSON mode is the primary
-        # tool-call path.")
+        # Call LLM with tool schemas so the model can produce structured tool calls
         messages = conversation.get_messages_for_api()
+        tool_schemas = registry.get_openai_schemas()
 
         if config.ui.stream:
             assistant_text, tool_calls_raw, stats = await _stream_response(
-                llm_client, messages, [], console
+                llm_client, messages, tool_schemas, console
             )
             if config.ui.show_token_count:
                 display_response_stats(
@@ -122,7 +123,7 @@ async def run_agent(
         else:
             t0 = time.monotonic()
             with thinking_spinner(console):
-                response = await llm_client.chat(messages, tools=[])
+                response = await llm_client.chat(messages, tools=tool_schemas)
             elapsed = time.monotonic() - t0
             assistant_text, tool_calls_raw = _parse_response(response)
             if assistant_text:
@@ -136,8 +137,36 @@ async def run_agent(
                     total_time=elapsed,
                 )
 
+        # Fallback: parse tool calls from text if model didn't use native calling
+        if not tool_calls_raw and assistant_text:
+            parsed, remaining_text = _extract_tool_calls_from_text(assistant_text, registry)
+            if parsed:
+                tool_calls_raw = parsed
+                assistant_text = remaining_text
+
         # Handle tool calls
         if tool_calls_raw:
+            # Detect repeated identical tool calls (model stuck in a loop)
+            sig = json.dumps(
+                [
+                    (tc.get("function", {}).get("name"), tc.get("function", {}).get("arguments"))
+                    for tc in tool_calls_raw
+                ],
+                sort_keys=True,
+            )
+            if sig == last_tool_signature:
+                repeat_count += 1
+                if repeat_count >= 1:
+                    display_error(
+                        console,
+                        "Detected repeated tool call — stopping to avoid infinite loop.",
+                    )
+                    conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+                    break
+            else:
+                repeat_count = 0
+            last_tool_signature = sig
+
             conversation.add(
                 Message(
                     role=Role.ASSISTANT,
@@ -370,6 +399,105 @@ def _parse_response(response: Any) -> tuple[str, list[dict[str, Any]]]:
         return "", []
 
 
+def _extract_tool_calls_from_text(
+    text: str, registry: ToolRegistry
+) -> tuple[list[dict[str, Any]], str]:
+    """Extract tool calls from text when the model outputs JSON instead of native calls.
+
+    Some local models output tool call JSON in text content rather than using
+    the structured tool_calls field. This parses those and returns them as
+    proper tool call dicts along with any remaining non-tool text.
+
+    Returns:
+        Tuple of (tool_calls_raw, remaining_text).
+    """
+    tool_calls: list[dict[str, Any]] = []
+    remaining_parts: list[str] = []
+
+    # First strip markdown fences, then find bare JSON objects
+    # Replace fenced JSON blocks with their contents for uniform parsing
+    fenced = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+    normalized = fenced.sub(r"\1", text)
+
+    # Find JSON objects by scanning for top-level braces
+    json_spans: list[tuple[int, int, dict[str, Any]]] = []
+    i = 0
+    while i < len(normalized):
+        if normalized[i] == "{":
+            obj, end = _try_parse_json_object(normalized, i)
+            if obj is not None:
+                json_spans.append((i, end, obj))
+                i = end
+                continue
+        i += 1
+
+    last_end = 0
+    for start, end, obj in json_spans:
+        before = normalized[last_end:start].strip()
+        if before:
+            remaining_parts.append(before)
+        last_end = end
+
+        name = obj.get("name", "")
+        arguments = obj.get("arguments", obj.get("params", {}))
+        if name and registry.has_tool(name) and isinstance(arguments, dict):
+            tool_calls.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    },
+                }
+            )
+        else:
+            remaining_parts.append(normalized[start:end])
+
+    trailing = normalized[last_end:].strip()
+    if trailing:
+        remaining_parts.append(trailing)
+
+    remaining_text = "\n".join(remaining_parts).strip()
+    return tool_calls, remaining_text
+
+
+def _try_parse_json_object(text: str, start: int) -> tuple[dict[str, Any] | None, int]:
+    """Try to parse a JSON object starting at position start in text.
+
+    Returns (parsed_dict, end_position) or (None, start) if parsing fails.
+    """
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : i + 1]
+                try:
+                    obj = json.loads(candidate)
+                    if isinstance(obj, dict):
+                        return obj, i + 1
+                except json.JSONDecodeError:
+                    return None, start
+    return None, start
+
+
 async def _process_tool_calls(
     tool_calls_raw: list[dict[str, Any]],
     conversation: Conversation,
@@ -378,8 +506,6 @@ async def _process_tool_calls(
     console: Console,
 ) -> None:
     """Process tool calls from an LLM response."""
-    import json
-
     for tc_raw in tool_calls_raw:
         func = tc_raw.get("function", {})
         tc_id = tc_raw.get("id", str(uuid.uuid4()))
