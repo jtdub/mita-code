@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import enum
+import sys
+from io import StringIO
 from typing import Annotated
 
 import typer
@@ -29,6 +32,14 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=True,
 )
+
+
+class OutputFormat(enum.StrEnum):
+    """Output format for non-interactive ask command."""
+
+    RICH = "rich"
+    TEXT = "text"
+    JSON = "json"
 
 
 # ── Version ───────────────────────────────────────────────────────
@@ -564,7 +575,12 @@ def ollama_status() -> None:
 
 
 @app.command("chat")
-def chat_command() -> None:
+def chat_command(
+    no_tools: Annotated[
+        bool,
+        typer.Option("--no-tools", help="Disable all tools."),
+    ] = False,
+) -> None:
     """Open an interactive chat session with the agent."""
     import asyncio
 
@@ -572,6 +588,7 @@ def chat_command() -> None:
     from mita.agent.loop import run_agent
     from mita.config.loader import load_config as _load_config
     from mita.models.server import ensure_model, ensure_server
+    from mita.tools.registry import ToolRegistry, create_default_registry
     from mita.ui.display import get_console
     from mita.ui.repl import repl_loop
 
@@ -589,17 +606,16 @@ def chat_command() -> None:
         raise typer.Exit(1)
 
     from mita.plugins.manager import PluginManager
-    from mita.tools.registry import create_default_registry
 
     conversation = Conversation()
-    registry = create_default_registry()
+    registry: ToolRegistry = ToolRegistry() if no_tools else create_default_registry()
 
     async def _run_chat() -> None:
         nonlocal conversation
 
         # Start MCP plugins at session level (not per-call)
         plugin_mgr: PluginManager | None = None
-        if cfg.plugins:
+        if cfg.plugins and not no_tools:
             plugin_mgr = PluginManager(cfg.plugins)
             await plugin_mgr.start_all(console=chat_console)
             await plugin_mgr.register_tools_async(registry)
@@ -628,18 +644,60 @@ def chat_command() -> None:
 
 @app.command("ask")
 def ask_command(
-    prompt: Annotated[str, typer.Argument(help="The prompt to send to the agent.")],
+    prompt: Annotated[
+        str | None,
+        typer.Argument(help="The prompt to send to the agent."),
+    ] = None,
+    output: Annotated[
+        OutputFormat | None,
+        typer.Option("--output", "-o", help="Output format: rich, text, or json."),
+    ] = None,
+    no_tools: Annotated[
+        bool,
+        typer.Option("--no-tools", help="Disable all tools."),
+    ] = False,
 ) -> None:
     """Send a single prompt to the agent (non-interactive)."""
     import asyncio
+    import json
 
+    from mita.agent.conversation import Conversation, Role
     from mita.agent.loop import run_agent
     from mita.config.loader import load_config as _load_config
     from mita.models.server import ensure_model, ensure_server
+    from mita.tools.registry import ToolRegistry, create_default_registry
     from mita.ui.display import get_console
 
+    # Assemble prompt from argument and/or stdin
+    parts: list[str] = []
+    if prompt is not None:
+        parts.append(prompt)
+    if not sys.stdin.isatty():
+        stdin_text = sys.stdin.read().strip()
+        if stdin_text:
+            parts.append(stdin_text)
+    if not parts:
+        console.print("[red]No prompt provided. Pass a prompt argument or pipe via stdin.[/red]")
+        raise typer.Exit(1)
+
+    full_prompt = "\n".join(parts)
+
+    # Resolve output format: explicit flag wins, else auto-detect
+    effective_output = output
+    if effective_output is None:
+        effective_output = OutputFormat.TEXT if not sys.stdout.isatty() else OutputFormat.RICH
+
     cfg = _load_config()
-    ask_console = get_console()
+
+    # Build the console for this run
+    if effective_output == OutputFormat.TEXT:
+        ask_console = Console(no_color=True, highlight=False)
+        cfg.ui.stream = False
+    elif effective_output == OutputFormat.JSON:
+        ask_console = Console(file=StringIO(), no_color=True, highlight=False)
+        cfg.ui.stream = False
+    else:
+        ask_console = get_console()
 
     if not ensure_server(
         host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=ask_console
@@ -651,25 +709,173 @@ def ask_command(
     ):
         raise typer.Exit(1)
 
-    async def _run_ask() -> None:
+    async def _run_ask() -> Conversation:
         from mita.plugins.manager import PluginManager
-        from mita.tools.registry import create_default_registry
 
-        registry = create_default_registry()
+        registry: ToolRegistry = ToolRegistry() if no_tools else create_default_registry()
 
         plugin_mgr: PluginManager | None = None
-        if cfg.plugins:
+        if cfg.plugins and not no_tools:
             plugin_mgr = PluginManager(cfg.plugins)
             await plugin_mgr.start_all(console=ask_console)
             await plugin_mgr.register_tools_async(registry)
 
         try:
-            await run_agent(prompt, cfg, ask_console, registry=registry)
+            return await run_agent(full_prompt, cfg, ask_console, registry=registry)
         finally:
             if plugin_mgr is not None:
                 await plugin_mgr.stop_all()
 
-    asyncio.run(_run_ask())
+    conversation = asyncio.run(_run_ask())
+
+    # Extract the last assistant message
+    last_assistant = ""
+    for msg in reversed(conversation.messages):
+        if msg.role == Role.ASSISTANT and msg.content:
+            last_assistant = msg.content
+            break
+
+    if effective_output == OutputFormat.TEXT:
+        print(last_assistant)  # noqa: T201
+    elif effective_output == OutputFormat.JSON:
+        print(  # noqa: T201
+            json.dumps({"response": last_assistant, "model": cfg.model.default})
+        )
+
+
+# ── Doctor command ────────────────────────────────────────────────
+
+
+@app.command("doctor")
+def doctor_command() -> None:
+    """Check system health and configuration."""
+    import platform
+
+    from mita.ui.display import display_error_with_suggestion
+
+    doc_console = Console()
+
+    # 1. Python version
+    py_ver = platform.python_version()
+    py_tuple = tuple(int(x) for x in py_ver.split(".")[:2])
+    if py_tuple >= (3, 11):
+        doc_console.print(f"  [green]\u2713[/green] Python {py_ver}")
+    else:
+        doc_console.print(f"  [red]\u2717[/red] Python {py_ver}")
+        display_error_with_suggestion(
+            doc_console,
+            "Python 3.11+ is required",
+            "Install Python 3.11 or later",
+        )
+
+    # 2. Ollama binary
+    from mita.models.server import find_ollama_binary
+
+    binary = find_ollama_binary()
+    if binary:
+        doc_console.print(f"  [green]\u2713[/green] Ollama binary found ({binary})")
+    else:
+        doc_console.print("  [red]\u2717[/red] Ollama binary not found")
+        display_error_with_suggestion(
+            doc_console,
+            "Ollama is not installed",
+            "Install from https://ollama.com",
+        )
+
+    # 3. Ollama server running
+    from mita.models.server import is_server_running
+
+    cfg = load_config()
+    if is_server_running(cfg.ollama.host):
+        doc_console.print("  [green]\u2713[/green] Ollama server running")
+    else:
+        doc_console.print("  [red]\u2717[/red] Ollama not running")
+        display_error_with_suggestion(
+            doc_console,
+            "Ollama server is not running",
+            "Run 'mita ollama start' or 'ollama serve'",
+        )
+
+    # 4. Default model installed
+    _check_model_installed(doc_console, cfg.model.default, "Default model", cfg)
+
+    # 5. Embedding model installed
+    _check_model_installed(doc_console, cfg.model.embedding, "Embedding model", cfg)
+
+    # 6. Config loads without error
+    try:
+        load_config()
+        doc_console.print("  [green]\u2713[/green] Config loaded successfully")
+    except Exception as exc:
+        doc_console.print("  [red]\u2717[/red] Config load error")
+        display_error_with_suggestion(
+            doc_console,
+            f"Config error: {exc}",
+            "Check ~/.config/mita/config.toml and .mita/settings.toml",
+        )
+
+    # 7. Memory files discoverable
+    from mita.memory.discovery import discover_memory_files
+
+    mem_files = discover_memory_files()
+    if mem_files:
+        doc_console.print(f"  [green]\u2713[/green] Memory files found ({len(mem_files)})")
+    else:
+        doc_console.print("  [yellow]![/yellow] No MITA.md memory files found")
+
+    # 8. Index exists
+    from pathlib import Path
+
+    from mita.index.store import IndexStore
+
+    index_dir = Path.cwd() / ".mita" / "index"
+    store = IndexStore(index_dir)
+    if store.exists():
+        doc_console.print("  [green]\u2713[/green] Codebase index exists")
+    else:
+        doc_console.print("  [yellow]![/yellow] No codebase index")
+        display_error_with_suggestion(
+            doc_console,
+            "Codebase index not built",
+            "Run 'mita index build' to create it",
+        )
+
+
+def _check_model_installed(doc_console: Console, model_name: str, label: str, cfg: object) -> None:
+    """Check if an Ollama model is installed and print status."""
+    from mita.config.schema import MitaConfig
+    from mita.models.ollama_client import OllamaClient
+    from mita.models.server import is_server_running
+    from mita.ui.display import display_error_with_suggestion
+
+    assert isinstance(cfg, MitaConfig)
+
+    if not is_server_running(cfg.ollama.host):
+        doc_console.print(
+            f"  [yellow]![/yellow] {label} ({model_name}) — cannot check (server not running)"
+        )
+        return
+
+    try:
+        client = OllamaClient(host=cfg.ollama.host, timeout=cfg.ollama.timeout)
+        installed = client.list_models()
+        found = any(
+            m.name == model_name
+            or m.name == f"{model_name}:latest"
+            or m.name.split(":")[0] == model_name.split(":")[0]
+            for m in installed
+        )
+        if found:
+            doc_console.print(f"  [green]\u2713[/green] {label} ({model_name}) installed")
+        else:
+            doc_console.print(f"  [red]\u2717[/red] {label} ({model_name}) not installed")
+            display_error_with_suggestion(
+                doc_console,
+                f"{label} '{model_name}' is not installed",
+                f"Run 'mita models pull {model_name}'",
+            )
+    except (ConnectionError, OSError):
+        doc_console.print(f"  [yellow]![/yellow] {label} ({model_name}) — cannot check")
 
 
 # ── Helpers ───────────────────────────────────────────────────────

@@ -101,85 +101,97 @@ async def run_agent(
     last_tool_signature: str | None = None
     repeat_count = 0
     for iteration in range(MAX_ITERATIONS):
-        # Truncate to fit context window
-        conversation.truncate_to_fit(config.model.context_window)
+        try:
+            # Truncate to fit context window
+            conversation.truncate_to_fit(config.model.context_window)
 
-        # Call LLM with tool schemas so the model can produce structured tool calls
-        messages = conversation.get_messages_for_api()
-        tool_schemas = registry.get_openai_schemas()
+            # Call LLM with tool schemas so the model can produce structured tool calls
+            messages = conversation.get_messages_for_api()
+            tool_schemas = registry.get_openai_schemas()
 
-        if config.ui.stream:
-            assistant_text, tool_calls_raw, stats = await _stream_response(
-                llm_client, messages, tool_schemas, console
-            )
-            if config.ui.show_token_count:
-                display_response_stats(
-                    console,
-                    prompt_tokens=stats.prompt_tokens,
-                    completion_tokens=stats.completion_tokens,
-                    total_time=stats.total_time,
-                    ttft=stats.ttft,
+            if config.ui.stream:
+                assistant_text, tool_calls_raw, stats = await _stream_response(
+                    llm_client, messages, tool_schemas, console
                 )
-        else:
-            t0 = time.monotonic()
-            with thinking_spinner(console):
-                response = await llm_client.chat(messages, tools=tool_schemas)
-            elapsed = time.monotonic() - t0
-            assistant_text, tool_calls_raw = _parse_response(response)
-            if assistant_text:
-                display_markdown(console, assistant_text)
-            if config.ui.show_token_count:
-                usage = _extract_usage(response) or {}
-                display_response_stats(
-                    console,
-                    prompt_tokens=usage.get("prompt_tokens", 0),
-                    completion_tokens=usage.get("completion_tokens", 0),
-                    total_time=elapsed,
-                )
-
-        # Fallback: parse tool calls from text if model didn't use native calling
-        if not tool_calls_raw and assistant_text:
-            parsed, remaining_text = _extract_tool_calls_from_text(assistant_text, registry)
-            if parsed:
-                tool_calls_raw = parsed
-                assistant_text = remaining_text
-
-        # Handle tool calls
-        if tool_calls_raw:
-            # Detect repeated identical tool calls (model stuck in a loop)
-            sig = json.dumps(
-                [
-                    (tc.get("function", {}).get("name"), tc.get("function", {}).get("arguments"))
-                    for tc in tool_calls_raw
-                ],
-                sort_keys=True,
-            )
-            if sig == last_tool_signature:
-                repeat_count += 1
-                if repeat_count >= 1:
-                    display_error(
+                if config.ui.show_token_count:
+                    display_response_stats(
                         console,
-                        "Detected repeated tool call — stopping to avoid infinite loop.",
+                        prompt_tokens=stats.prompt_tokens,
+                        completion_tokens=stats.completion_tokens,
+                        total_time=stats.total_time,
+                        ttft=stats.ttft,
                     )
-                    conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-                    break
             else:
-                repeat_count = 0
-            last_tool_signature = sig
+                t0 = time.monotonic()
+                with thinking_spinner(console):
+                    response = await llm_client.chat(messages, tools=tool_schemas)
+                elapsed = time.monotonic() - t0
+                assistant_text, tool_calls_raw = _parse_response(response)
+                if assistant_text:
+                    display_markdown(console, assistant_text)
+                if config.ui.show_token_count:
+                    usage = _extract_usage(response) or {}
+                    display_response_stats(
+                        console,
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        completion_tokens=usage.get("completion_tokens", 0),
+                        total_time=elapsed,
+                    )
 
-            conversation.add(
-                Message(
-                    role=Role.ASSISTANT,
-                    content=assistant_text,
-                    tool_calls=tool_calls_raw,
+            # Fallback: parse tool calls from text if model didn't use native calling
+            if not tool_calls_raw and assistant_text:
+                parsed, remaining_text = _extract_tool_calls_from_text(assistant_text, registry)
+                if parsed:
+                    tool_calls_raw = parsed
+                    assistant_text = remaining_text
+
+            # Handle tool calls
+            if tool_calls_raw:
+                # Detect repeated identical tool calls (model stuck in a loop)
+                sig = json.dumps(
+                    [
+                        (
+                            tc.get("function", {}).get("name"),
+                            tc.get("function", {}).get("arguments"),
+                        )
+                        for tc in tool_calls_raw
+                    ],
+                    sort_keys=True,
                 )
-            )
-            await _process_tool_calls(tool_calls_raw, conversation, registry, config, console)
-            continue
+                if sig == last_tool_signature:
+                    repeat_count += 1
+                    if repeat_count >= 1:
+                        display_error(
+                            console,
+                            "Detected repeated tool call — stopping to avoid infinite loop.",
+                        )
+                        conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+                        break
+                else:
+                    repeat_count = 0
+                last_tool_signature = sig
 
-        # No tool calls — add assistant message and stop
-        conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-        break
+                conversation.add(
+                    Message(
+                        role=Role.ASSISTANT,
+                        content=assistant_text,
+                        tool_calls=tool_calls_raw,
+                    )
+                )
+                await _process_tool_calls(tool_calls_raw, conversation, registry, config, console)
+                continue
+
+            # No tool calls — add assistant message and stop
+            conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+            break
+
+        except KeyboardInterrupt:
+            display_error(console, "[Interrupted]")
+            # Add any partial response as assistant message
+            partial = locals().get("assistant_text", "")
+            if partial:
+                conversation.add(Message(role=Role.ASSISTANT, content=str(partial)))
+            break
     else:
         display_error(
             console,
