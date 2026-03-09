@@ -6,6 +6,7 @@ readme = "README.md"
 license = "Apache-2.0"
 authors = ["James Williams <james.williams@jtdub.com>"]
 packages = [{include = "mita", from = "src"}]
+keywords = ["cli", "coding-assistant", "ollama", "llm", "local", "agentic"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -23,6 +24,8 @@ classifiers = [
 Homepage = "https://github.com/jtdub/mita-code"
 Repository = "https://github.com/jtdub/mita-code"
 Issues = "https://github.com/jtdub/mita-code/issues"
+Documentation = "https://mita-code.readthedocs.io/"
+Changelog = "https://github.com/jtdub/mita-code/blob/develop/CHANGELOG.md"
 
 [tool.poetry.scripts]
 mita = "mita.cli:app"
