@@ -305,6 +305,157 @@ def skills_path() -> None:
     show_paths()
 
 
+# ── Plugin commands ───────────────────────────────────────────────
+
+plugins_app = typer.Typer(help="MCP plugin management.")
+app.add_typer(plugins_app, name="plugins")
+
+
+@plugins_app.command("list")
+def plugins_list() -> None:
+    """List configured plugins and their tools."""
+    import asyncio
+
+    from mita.plugins.manager import PluginManager
+
+    cfg = load_config()
+    if not cfg.plugins:
+        console.print("[dim]No plugins configured.[/dim]")
+        return
+
+    async def _list() -> None:
+        mgr = PluginManager(cfg.plugins)
+        started = await mgr.start_all(console=console)
+        try:
+            for plugin in cfg.plugins:
+                connected = plugin.name in started
+                status = "[green]connected[/green]" if connected else "[red]not connected[/red]"
+                transport = plugin.transport
+                target = plugin.command or plugin.url or ""
+                console.print(f"  {plugin.name} ({transport}) — {status}")
+                console.print(f"    {target}")
+
+                if connected:
+                    tools_map = await mgr.list_tools(plugin.name)
+                    tools = tools_map.get(plugin.name, [])
+                    if tools:
+                        for t in tools:
+                            console.print(f"    - {t['name']}: {t['description']}")
+                    else:
+                        console.print("    [dim]No tools[/dim]")
+        finally:
+            await mgr.stop_all()
+
+    asyncio.run(_list())
+
+
+@plugins_app.command("add")
+def plugins_add(
+    name: Annotated[str, typer.Argument(help="Plugin name.")],
+    command: Annotated[
+        str | None, typer.Option("--command", "-c", help="Command for stdio.")
+    ] = None,
+    url: Annotated[str | None, typer.Option("--url", "-u", help="URL for SSE.")] = None,
+) -> None:
+    """Add an MCP plugin to project config."""
+    if not command and not url:
+        console.print("[red]Provide --command or --url.[/red]")
+        raise typer.Exit(1)
+
+    from mita.config.defaults import get_project_config_path
+
+    project_path = get_project_config_path()
+    if not project_path:
+        console.print("[red]Not in a project directory (no .mita/).[/red]")
+        raise typer.Exit(1)
+
+    transport = "stdio" if command else "sse"
+    # Build TOML block
+    lines = [f'\n[[plugins]]\nname = "{name}"\ntransport = "{transport}"']
+    if command:
+        # Split command into executable + args
+        parts = command.split()
+        lines.append(f'command = "{parts[0]}"')
+        if len(parts) > 1:
+            args_toml = ", ".join(f'"{a}"' for a in parts[1:])
+            lines.append(f"args = [{args_toml}]")
+    if url:
+        lines.append(f'url = "{url}"')
+
+    block = "\n".join(lines) + "\n"
+
+    with open(project_path, "a") as f:
+        f.write(block)
+
+    console.print(f"[green]Plugin '{name}' added to {project_path}[/green]")
+
+
+@plugins_app.command("remove")
+def plugins_remove(
+    name: Annotated[str, typer.Argument(help="Plugin name to remove.")],
+) -> None:
+    """Remove an MCP plugin from project config."""
+    from mita.config.defaults import get_project_config_path
+
+    project_path = get_project_config_path()
+    if not project_path or not project_path.is_file():
+        console.print("[red]No project config found.[/red]")
+        raise typer.Exit(1)
+
+    import tomllib
+
+    with open(project_path, "rb") as f:
+        data = tomllib.load(f)
+
+    plugins = data.get("plugins", [])
+    new_plugins = [p for p in plugins if p.get("name") != name]
+    if len(new_plugins) == len(plugins):
+        console.print(f"[yellow]Plugin '{name}' not found in project config.[/yellow]")
+        return
+
+    data["plugins"] = new_plugins
+    _write_toml(project_path, data)
+    console.print(f"[green]Plugin '{name}' removed.[/green]")
+
+
+@plugins_app.command("test")
+def plugins_test(
+    name: Annotated[str, typer.Argument(help="Plugin name to test.")],
+) -> None:
+    """Test connectivity to an MCP plugin."""
+    import asyncio
+
+    from mita.plugins.manager import PluginManager
+
+    cfg = load_config()
+    plugin = next((p for p in cfg.plugins if p.name == name), None)
+    if not plugin:
+        console.print(f"[red]Plugin '{name}' not found in configuration.[/red]")
+        raise typer.Exit(1)
+
+    async def _test() -> None:
+        mgr = PluginManager([plugin])
+        started = await mgr.start_all(console=console)
+        try:
+            if name not in started:
+                console.print(f"[red]Failed to connect to '{name}'.[/red]")
+                raise typer.Exit(1)
+
+            result = await mgr.test_plugin(name)
+            if result.get("ping"):
+                console.print(f"[green]Plugin '{name}' is healthy.[/green]")
+                tool_names = result.get("tool_names", [])
+                console.print(f"  Tools: {len(tool_names)}")
+                for t in tool_names:
+                    console.print(f"    - {t}")
+            else:
+                console.print(f"[red]Plugin '{name}' ping failed.[/red]")
+        finally:
+            await mgr.stop_all()
+
+    asyncio.run(_test())
+
+
 # ── Ollama server commands ────────────────────────────────────────
 
 ollama_app = typer.Typer(help="Ollama server management.")
@@ -479,3 +630,12 @@ def _toml_value(v: object) -> str:
         items = ", ".join(_toml_value(i) for i in v)
         return f"[{items}]"
     return repr(v)
+
+
+def _write_toml(path: object, data: dict) -> None:  # type: ignore[type-arg]
+    """Write a dict back to a TOML file."""
+    from pathlib import Path
+
+    lines: list[str] = []
+    _dict_to_toml(data, lines, prefix="")
+    Path(str(path)).write_text("\n".join(lines) + "\n")
