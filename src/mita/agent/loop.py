@@ -97,6 +97,12 @@ async def run_agent(
         except (ConnectionError, FileNotFoundError, ImportError, OSError):
             pass  # Index unavailable; proceed without RAG
 
+    # Fire session_start hooks
+    if config.hooks:
+        from mita.hooks.runner import run_hooks
+
+        await run_hooks("session_start", config.hooks, console=console)
+
     # Agent loop
     for iteration in range(MAX_ITERATIONS):
         # Truncate to fit context window
@@ -158,6 +164,12 @@ async def run_agent(
             console,
             f"Reached maximum iterations ({MAX_ITERATIONS}). Stopping.",
         )
+
+    # Fire session_end hooks
+    if config.hooks:
+        from mita.hooks.runner import run_hooks
+
+        await run_hooks("session_end", config.hooks, console=console)
 
     return conversation
 
@@ -396,6 +408,17 @@ async def _process_tool_calls(
         # Display the tool call
         display_tool_call(console, tool_call)
 
+        # Fire pre_tool_call hooks
+        if config.hooks:
+            from mita.hooks.runner import run_hooks
+
+            await run_hooks(
+                "pre_tool_call",
+                config.hooks,
+                context={"tool": name, "args": arguments},
+                console=console,
+            )
+
         # Create confirm function bound to console
         async def confirm_fn(prompt: str) -> bool:
             return await prompt_user_confirm(console, prompt)
@@ -405,6 +428,30 @@ async def _process_tool_calls(
 
         # Display result
         display_tool_result(console, result)
+
+        # Fire post_tool_call hooks
+        if config.hooks:
+            from mita.hooks.runner import run_hooks
+
+            await run_hooks(
+                "post_tool_call",
+                config.hooks,
+                context={"tool": name, "result": str(result.output or result.error)},
+                console=console,
+            )
+
+        # Fire on_file_write hooks for file_write/file_edit tools
+        if config.hooks and result.success and name in ("file_write", "file_edit"):
+            from mita.hooks.runner import run_hooks
+
+            file_path = arguments.get("path", "")
+            if file_path:
+                await run_hooks(
+                    "on_file_write",
+                    config.hooks,
+                    context={"file_path": file_path},
+                    console=console,
+                )
 
         # Add tool result to conversation
         conversation.add(

@@ -305,6 +305,42 @@ def skills_path() -> None:
     show_paths()
 
 
+# ── Hook commands ─────────────────────────────────────────────────
+
+hooks_app = typer.Typer(help="Lifecycle hooks management.")
+app.add_typer(hooks_app, name="hooks")
+
+
+@hooks_app.command("list")
+def hooks_list() -> None:
+    """List configured hooks."""
+    from mita.hooks.manager import list_hooks
+
+    list_hooks()
+
+
+@hooks_app.command("add")
+def hooks_add(
+    event: Annotated[str, typer.Argument(help="Hook event (e.g. on_file_write).")],
+    command: Annotated[str, typer.Argument(help="Shell command to run.")],
+    match: Annotated[str | None, typer.Option("--match", "-m", help="Glob pattern filter.")] = None,
+) -> None:
+    """Add a hook to project config."""
+    from mita.hooks.manager import add_hook
+
+    add_hook(event, command, match)
+
+
+@hooks_app.command("remove")
+def hooks_remove(
+    event: Annotated[str, typer.Argument(help="Hook event to remove.")],
+) -> None:
+    """Remove hooks for an event from project config."""
+    from mita.hooks.manager import remove_hooks
+
+    remove_hooks(event)
+
+
 # ── Plugin commands ───────────────────────────────────────────────
 
 plugins_app = typer.Typer(help="MCP plugin management.")
