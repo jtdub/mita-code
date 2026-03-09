@@ -56,14 +56,6 @@ async def run_agent(
     if registry is None:
         registry = create_default_registry()
 
-    # Load MCP plugin tools (if configured and not already loaded)
-    if config.plugins and not any(d.source.startswith("mcp:") for d in registry.get_definitions()):
-        from mita.plugins.manager import PluginManager
-
-        plugin_mgr = PluginManager(config.plugins)
-        await plugin_mgr.start_all(console=console)
-        await plugin_mgr.register_tools_async(registry)
-
     if llm_client is None:
         llm_client = LLMClient(config)
     if conversation is None:

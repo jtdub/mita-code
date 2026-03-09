@@ -588,17 +588,42 @@ def chat_command() -> None:
     ):
         raise typer.Exit(1)
 
+    from mita.plugins.manager import PluginManager
+    from mita.tools.registry import create_default_registry
+
     conversation = Conversation()
+    registry = create_default_registry()
 
-    async def on_input(user_input: str) -> None:
+    async def _run_chat() -> None:
         nonlocal conversation
-        conversation = await run_agent(user_input, cfg, chat_console, conversation=conversation)
 
-    def on_clear() -> None:
-        nonlocal conversation
-        conversation.clear_non_system()
+        # Start MCP plugins at session level (not per-call)
+        plugin_mgr: PluginManager | None = None
+        if cfg.plugins:
+            plugin_mgr = PluginManager(cfg.plugins)
+            await plugin_mgr.start_all(console=chat_console)
+            await plugin_mgr.register_tools_async(registry)
 
-    asyncio.run(repl_loop(chat_console, on_input, on_clear=on_clear, skills_paths=cfg.skills_paths))
+        try:
+
+            async def on_input(user_input: str) -> None:
+                nonlocal conversation
+                conversation = await run_agent(
+                    user_input, cfg, chat_console, conversation=conversation, registry=registry
+                )
+
+            def on_clear() -> None:
+                nonlocal conversation
+                conversation.clear_non_system()
+
+            await repl_loop(
+                chat_console, on_input, on_clear=on_clear, skills_paths=cfg.skills_paths
+            )
+        finally:
+            if plugin_mgr is not None:
+                await plugin_mgr.stop_all()
+
+    asyncio.run(_run_chat())
 
 
 @app.command("ask")
@@ -626,7 +651,25 @@ def ask_command(
     ):
         raise typer.Exit(1)
 
-    asyncio.run(run_agent(prompt, cfg, ask_console))
+    async def _run_ask() -> None:
+        from mita.plugins.manager import PluginManager
+        from mita.tools.registry import create_default_registry
+
+        registry = create_default_registry()
+
+        plugin_mgr: PluginManager | None = None
+        if cfg.plugins:
+            plugin_mgr = PluginManager(cfg.plugins)
+            await plugin_mgr.start_all(console=ask_console)
+            await plugin_mgr.register_tools_async(registry)
+
+        try:
+            await run_agent(prompt, cfg, ask_console, registry=registry)
+        finally:
+            if plugin_mgr is not None:
+                await plugin_mgr.stop_all()
+
+    asyncio.run(_run_ask())
 
 
 # ── Helpers ───────────────────────────────────────────────────────
