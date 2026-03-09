@@ -362,12 +362,26 @@ def plugins_add(
         console.print("[red]Provide --command or --url.[/red]")
         raise typer.Exit(1)
 
-    from mita.config.defaults import get_project_config_path
+    from pathlib import Path
+
+    from mita.config.defaults import (
+        PROJECT_CONFIG_DIR,
+        PROJECT_CONFIG_FILE,
+        _find_project_root,
+        get_project_config_path,
+    )
 
     project_path = get_project_config_path()
     if not project_path:
-        console.print("[red]Not in a project directory (no .mita/).[/red]")
-        raise typer.Exit(1)
+        # Create .mita/settings.toml if we're in a project root (has .git)
+        root = _find_project_root(Path.cwd())
+        if root is None:
+            console.print("[red]Not in a project directory (no .git or .mita/).[/red]")
+            raise typer.Exit(1)
+        config_dir = root / PROJECT_CONFIG_DIR
+        config_dir.mkdir(exist_ok=True)
+        project_path = config_dir / PROJECT_CONFIG_FILE
+        project_path.touch()
 
     transport = "stdio" if command else "sse"
     # Build TOML block
