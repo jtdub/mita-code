@@ -33,7 +33,7 @@ def _find_project_root(start: Path) -> Path | None:
     """Walk up from start to find a project root (contains .git or .mita)."""
     current = start.resolve()
     while True:
-        if (current / ".git").exists() or (current / PROJECT_CONFIG_DIR).exists():
+        if (current / ".git").is_dir() or (current / PROJECT_CONFIG_DIR).is_dir():
             return current
         parent = current.parent
         if parent == current:

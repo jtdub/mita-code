@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import ollama
 
 from mita.config.schema import MitaConfig
@@ -45,5 +47,6 @@ class EmbeddingClient:
                 m == self._model or (m is not None and m.startswith(base_name + ":"))
                 for m in model_names
             )
-        except Exception:  # noqa: BLE001
+        except (ollama.ResponseError, ConnectionError, OSError) as e:
+            logging.getLogger(__name__).warning("Embedding model check failed: %s", e)
             return False

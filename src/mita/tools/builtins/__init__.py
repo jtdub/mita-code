@@ -16,8 +16,10 @@ from mita.tools.builtins.grep_tool import TOOL_DEF as GREP_DEF
 from mita.tools.builtins.grep_tool import execute as grep_execute
 from mita.tools.builtins.shell import TOOL_DEF as SHELL_DEF
 from mita.tools.builtins.shell import execute as shell_execute
+from mita.tools.registry import ToolHandler
+from mita.tools.schema import ToolDefinition
 
-BUILTIN_TOOLS: dict[str, tuple[object, object]] = {
+BUILTIN_TOOLS: dict[str, tuple[ToolDefinition, ToolHandler]] = {
     FILE_READ_DEF.name: (FILE_READ_DEF, file_read_execute),
     FILE_WRITE_DEF.name: (FILE_WRITE_DEF, file_write_execute),
     FILE_EDIT_DEF.name: (FILE_EDIT_DEF, file_edit_execute),

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from mita.skills.executor import _parse_args, _substitute, _tokenize, render_skill
 from mita.skills.loader import Skill, SkillArg, SkillFrontmatter
 
@@ -49,8 +51,9 @@ class TestSubstitute:
     def test_basic(self) -> None:
         assert _substitute("Hello {{name}}!", {"name": "world"}) == "Hello world!"
 
-    def test_missing_key(self) -> None:
-        assert _substitute("Hello {{name}}!", {}) == "Hello {{name}}!"
+    def test_missing_key_raises(self) -> None:
+        with pytest.raises(ValueError, match="Missing required skill arguments: name"):
+            _substitute("Hello {{name}}!", {})
 
     def test_multiple(self) -> None:
         result = _substitute("{{a}} and {{b}}", {"a": "X", "b": "Y"})

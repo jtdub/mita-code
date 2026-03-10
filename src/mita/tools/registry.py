@@ -65,5 +65,5 @@ def create_default_registry() -> ToolRegistry:
 
     registry = ToolRegistry()
     for _name, (definition, handler) in BUILTIN_TOOLS.items():
-        registry.register(definition, handler)  # type: ignore[arg-type]
+        registry.register(definition, handler)
     return registry
