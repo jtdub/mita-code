@@ -86,9 +86,7 @@ async def build_index(force: bool = False, pull_model_fn: object | None = None) 
             try:
                 batch_embeddings = await embedder.embed_texts(batch)
             except (ConnectionError, TimeoutError, OSError) as e:
-                console.print(
-                    f"\n[red]Embedding failed at batch {i // batch_size + 1}: {e}[/red]"
-                )
+                console.print(f"\n[red]Embedding failed at batch {i // batch_size + 1}: {e}[/red]")
                 console.print("[red]Index build aborted to prevent data corruption.[/red]")
                 return
             embeddings.extend(batch_embeddings)
