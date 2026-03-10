@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import shlex
 import sys
 from io import StringIO
 from typing import Annotated
@@ -434,8 +435,8 @@ def plugins_add(
     # Build TOML block
     lines = [f'\n[[plugins]]\nname = "{name}"\ntransport = "{transport}"']
     if command:
-        # Split command into executable + args
-        parts = command.split()
+        # Split command into executable + args (respects quoted arguments)
+        parts = shlex.split(command)
         lines.append(f'command = "{parts[0]}"')
         if len(parts) > 1:
             args_toml = ", ".join(f'"{a}"' for a in parts[1:])

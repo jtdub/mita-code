@@ -49,7 +49,14 @@ async def execute(args: dict[str, Any]) -> ToolResult:
         )
         stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
-        proc.kill()
+        try:
+            proc.terminate()
+            await asyncio.sleep(0.5)
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+        except (OSError, ProcessLookupError):
+            pass
         return ToolResult(
             tool_call_id="",
             success=False,

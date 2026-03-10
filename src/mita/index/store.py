@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
@@ -122,6 +123,9 @@ class IndexStore:
             db = self._connect()
             return self.TABLE_NAME in db.table_names()
         except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "Index existence check failed for %s", self._db_path, exc_info=True
+            )
             return False
 
 

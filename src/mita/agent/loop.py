@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import re
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 from rich.console import Console
@@ -28,6 +31,8 @@ from mita.ui.display import (
     prompt_user_confirm,
 )
 from mita.ui.spinner import thinking_spinner
+
+_logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 25
 _RAG_CONTEXT_PREFIX = "Relevant code from the project index:"
@@ -89,7 +94,7 @@ async def run_agent(
                         )
                     )
         except (ConnectionError, FileNotFoundError, ImportError, OSError):
-            pass  # Index unavailable; proceed without RAG
+            _logger.warning("RAG index unavailable, proceeding without it", exc_info=True)
 
     # Fire session_start hooks
     if config.hooks:
@@ -207,13 +212,14 @@ async def run_agent(
     return conversation
 
 
+@dataclass
 class _ResponseStats:
     """Token usage and timing stats from an LLM response."""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_time: float = 0.0
-    ttft: float | None = None
+    ttft: float | None = field(default=None)
 
 
 async def _stream_response(
@@ -233,33 +239,33 @@ async def _stream_response(
     stats = _ResponseStats()
     start_time = time.monotonic()
 
-    # Show spinner while waiting for first token
-    spinner_ctx = thinking_spinner(console)
-    spinner_ctx.__enter__()
+    # Show spinner while waiting for first token; use ExitStack for safe cleanup
+    spinner_stack = contextlib.ExitStack()
+    spinner_stack.enter_context(thinking_spinner(console))
 
-    async for chunk in client.stream_chat(messages, tools=tool_schemas):
-        if first_token:
-            spinner_ctx.__exit__(None, None, None)
-            stats.ttft = time.monotonic() - start_time
-            first_token = False
+    try:
+        async for chunk in client.stream_chat(messages, tools=tool_schemas):
+            if first_token:
+                spinner_stack.close()
+                stats.ttft = time.monotonic() - start_time
+                first_token = False
 
-        delta = _extract_delta(chunk)
-        if delta:
-            full_text += delta
-            display_streaming_token(console, delta)
+            delta = _extract_delta(chunk)
+            if delta:
+                full_text += delta
+                display_streaming_token(console, delta)
 
-        # Accumulate tool call deltas
-        _accumulate_tool_call_deltas(chunk, tool_calls_by_index)
+            # Accumulate tool call deltas
+            _accumulate_tool_call_deltas(chunk, tool_calls_by_index)
 
-        # Extract usage from final chunk (LiteLLM includes it on the last chunk)
-        usage = _extract_usage(chunk)
-        if usage:
-            stats.prompt_tokens = usage.get("prompt_tokens", 0)
-            stats.completion_tokens = usage.get("completion_tokens", 0)
-
-    # Clean up spinner if no chunks arrived at all
-    if first_token:
-        spinner_ctx.__exit__(None, None, None)
+            # Extract usage from final chunk (LiteLLM includes it on the last chunk)
+            usage = _extract_usage(chunk)
+            if usage:
+                stats.prompt_tokens = usage.get("prompt_tokens", 0)
+                stats.completion_tokens = usage.get("completion_tokens", 0)
+    finally:
+        # Ensure spinner is cleaned up even on exception or empty stream
+        spinner_stack.close()
 
     stats.total_time = time.monotonic() - start_time
 

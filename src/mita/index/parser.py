@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -168,6 +169,9 @@ def _parse_with_treesitter(
     try:
         parser = get_parser(language)  # type: ignore[arg-type]
     except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "Tree-sitter parser unavailable for language '%s'", language
+        )
         return []
 
     tree = parser.parse(content.encode("utf-8"))

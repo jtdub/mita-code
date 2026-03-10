@@ -75,10 +75,19 @@ def _tokenize(text: str) -> list[str]:
 
 
 def _substitute(template: str, args: dict[str, str]) -> str:
-    """Replace {{arg}} placeholders in the template."""
+    """Replace {{arg}} placeholders in the template.
+
+    Raises:
+        ValueError: If any placeholder has no matching argument.
+    """
+    # Find all placeholders first to validate
+    placeholders = re.findall(r"\{\{(\w+)\}\}", template)
+    missing = [p.strip() for p in placeholders if p.strip() not in args]
+    if missing:
+        raise ValueError(f"Missing required skill arguments: {', '.join(sorted(set(missing)))}")
 
     def replacer(match: re.Match[str]) -> str:
         key = match.group(1).strip()
-        return args.get(key, match.group(0))
+        return args[key]
 
     return re.sub(r"\{\{(\w+)\}\}", replacer, template)
