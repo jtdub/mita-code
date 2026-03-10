@@ -28,6 +28,12 @@ async def execute(args: dict[str, Any]) -> ToolResult:
 
     path = Path(path_str).expanduser().resolve()
 
+    from mita.tools.safety import validate_path_for_write
+
+    path_error = validate_path_for_write(path)
+    if path_error:
+        return ToolResult(tool_call_id="", success=False, error=path_error)
+
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         existed = path.exists()

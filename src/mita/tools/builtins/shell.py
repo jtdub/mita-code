@@ -34,7 +34,10 @@ TOOL_DEF = ToolDefinition(
 async def execute(args: dict[str, Any]) -> ToolResult:
     """Execute a shell command."""
     command = str(args.get("command", ""))
-    timeout = int(args.get("timeout", 120) or 120)
+    try:
+        timeout = max(1, int(args.get("timeout", 120) or 120))
+    except (ValueError, TypeError):
+        timeout = 120
 
     if not command:
         return ToolResult(

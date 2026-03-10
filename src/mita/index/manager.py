@@ -79,13 +79,26 @@ async def build_index(force: bool = False, pull_model_fn: object | None = None) 
         console=console,
     ) as progress:
         task = progress.add_task("Generating embeddings...", total=len(texts))
-        embeddings = []
+        embeddings: list[list[float]] = []
         batch_size = 32
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
-            batch_embeddings = await embedder.embed_texts(batch)
+            try:
+                batch_embeddings = await embedder.embed_texts(batch)
+            except (ConnectionError, TimeoutError, OSError) as e:
+                console.print(f"\n[red]Embedding failed at batch {i // batch_size + 1}: {e}[/red]")
+                console.print("[red]Index build aborted to prevent data corruption.[/red]")
+                return
             embeddings.extend(batch_embeddings)
             progress.update(task, completed=min(i + batch_size, len(texts)))
+
+    # Verify alignment before attaching
+    if len(embeddings) != len(chunks):
+        console.print(
+            f"[red]Embedding count mismatch ({len(embeddings)} vs {len(chunks)} chunks). "
+            "Index build aborted.[/red]"
+        )
+        return
 
     # Attach embeddings to chunks
     for chunk, embedding in zip(chunks, embeddings):

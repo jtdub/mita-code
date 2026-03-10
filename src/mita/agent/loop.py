@@ -110,7 +110,8 @@ async def run_agent(
     last_tool_signature: str | None = None
     repeat_count = 0
     max_iterations = config.max_iterations
-    for iteration in range(max_iterations):
+    assistant_text = ""
+    for _iteration in range(max_iterations):
         try:
             # Truncate to fit context window
             conversation.truncate_to_fit(config.model.context_window)
@@ -198,9 +199,18 @@ async def run_agent(
         except KeyboardInterrupt:
             display_error(console, "[Interrupted]")
             # Add any partial response as assistant message
-            partial = locals().get("assistant_text", "")
-            if partial:
-                conversation.add(Message(role=Role.ASSISTANT, content=str(partial)))
+            if assistant_text:
+                conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+            break
+        except (ConnectionError, TimeoutError, OSError) as e:
+            _logger.warning("LLM call failed: %s", e, exc_info=True)
+            display_error(console, f"LLM error: {e}")
+            if assistant_text:
+                conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+            break
+        except json.JSONDecodeError as e:
+            _logger.warning("Failed to parse LLM response: %s", e, exc_info=True)
+            display_error(console, f"Response parse error: {e}")
             break
     else:
         display_error(

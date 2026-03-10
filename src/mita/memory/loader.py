@@ -24,7 +24,7 @@ def _classify_scope(path: Path) -> str:
 
 def _read_and_truncate(path: Path, max_lines: int) -> tuple[str, bool]:
     """Read a file and truncate to max_lines. Returns (content, was_truncated)."""
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     if len(lines) <= max_lines:
         return "\n".join(lines), False
     truncated = lines[:max_lines]

@@ -49,9 +49,12 @@ def add_hook(event: str, command: str, match: str | None = None) -> None:
         project_path = config_dir / PROJECT_CONFIG_FILE
         project_path.touch()
 
-    lines = [f'\n[[hooks]]\nevent = "{event}"\ncommand = "{command}"']
+    from mita.cli import _escape_toml_string
+
+    esc = _escape_toml_string
+    lines = [f'\n[[hooks]]\nevent = "{esc(event)}"\ncommand = "{esc(command)}"']
     if match:
-        lines.append(f'match = "{match}"')
+        lines.append(f'match = "{esc(match)}"')
 
     block = "\n".join(lines) + "\n"
 

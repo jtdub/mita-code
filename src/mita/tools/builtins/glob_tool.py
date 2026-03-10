@@ -44,6 +44,12 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     if not base.is_dir():
         return ToolResult(tool_call_id="", success=False, error=f"Not a directory: {base}")
 
+    from mita.tools.safety import validate_search_base
+
+    base_error = validate_search_base(base)
+    if base_error:
+        return ToolResult(tool_call_id="", success=False, error=base_error)
+
     try:
         matches = sorted(base.glob(pattern))
     except ValueError as e:

@@ -39,11 +39,17 @@ async def execute(args: dict[str, Any]) -> ToolResult:
 
     path = Path(path_str).expanduser().resolve()
 
+    from mita.tools.safety import validate_path_for_write
+
+    path_error = validate_path_for_write(path)
+    if path_error:
+        return ToolResult(tool_call_id="", success=False, error=path_error)
+
     if not path.is_file():
         return ToolResult(tool_call_id="", success=False, error=f"File not found: {path}")
 
     try:
-        content = path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         return ToolResult(tool_call_id="", success=False, error=f"Cannot read file: {e}")
 

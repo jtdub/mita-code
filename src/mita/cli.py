@@ -452,17 +452,18 @@ def plugins_add(
         project_path.touch()
 
     transport = "stdio" if command else "sse"
-    # Build TOML block
-    lines = [f'\n[[plugins]]\nname = "{name}"\ntransport = "{transport}"']
+    # Build TOML block with proper escaping
+    esc = _escape_toml_string
+    lines = [f'\n[[plugins]]\nname = "{esc(name)}"\ntransport = "{esc(transport)}"']
     if command:
         # Split command into executable + args (respects quoted arguments)
         parts = shlex.split(command)
-        lines.append(f'command = "{parts[0]}"')
+        lines.append(f'command = "{esc(parts[0])}"')
         if len(parts) > 1:
-            args_toml = ", ".join(f'"{a}"' for a in parts[1:])
+            args_toml = ", ".join(f'"{esc(a)}"' for a in parts[1:])
             lines.append(f"args = [{args_toml}]")
     if url:
-        lines.append(f'url = "{url}"')
+        lines.append(f'url = "{esc(url)}"')
 
     block = "\n".join(lines) + "\n"
 
@@ -938,12 +939,22 @@ def _dict_to_toml(data: dict, lines: list[str], prefix: str) -> None:  # type: i
         _dict_to_toml(v, lines, prefix=f"{section}.")
 
 
+def _escape_toml_string(s: str) -> str:
+    """Escape a string for safe inclusion in a TOML quoted value."""
+    s = s.replace("\\", "\\\\")
+    s = s.replace('"', '\\"')
+    s = s.replace("\n", "\\n")
+    s = s.replace("\r", "\\r")
+    s = s.replace("\t", "\\t")
+    return s
+
+
 def _toml_value(v: object) -> str:
     """Format a Python value as a TOML value string."""
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, str):
-        return f'"{v}"'
+        return f'"{_escape_toml_string(v)}"'
     if isinstance(v, (int, float)):
         return str(v)
     if isinstance(v, list):
