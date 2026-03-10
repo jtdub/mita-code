@@ -51,8 +51,10 @@ class IndexStore:
         def _sync() -> None:
             db = self._connect()
             records = _chunks_to_records(chunks)
-            if self.TABLE_NAME in db.table_names():
+            try:
                 db.drop_table(self.TABLE_NAME)
+            except (ValueError, FileNotFoundError):
+                pass  # Table doesn't exist — that's fine
             db.create_table(self.TABLE_NAME, data=records)
 
         await asyncio.to_thread(_sync)

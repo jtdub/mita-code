@@ -618,7 +618,7 @@ def chat_command(
         if cfg.plugins and not no_tools:
             plugin_mgr = PluginManager(cfg.plugins)
             await plugin_mgr.start_all(console=chat_console)
-            await plugin_mgr.register_tools_async(registry)
+            await plugin_mgr.register_tools(registry)
 
         try:
 
@@ -718,7 +718,7 @@ def ask_command(
         if cfg.plugins and not no_tools:
             plugin_mgr = PluginManager(cfg.plugins)
             await plugin_mgr.start_all(console=ask_console)
-            await plugin_mgr.register_tools_async(registry)
+            await plugin_mgr.register_tools(registry)
 
         try:
             return await run_agent(full_prompt, cfg, ask_console, registry=registry)

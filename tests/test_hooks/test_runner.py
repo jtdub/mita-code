@@ -61,6 +61,16 @@ class TestRenderCommand:
         result = _render_command("echo {unknown}", {"file_path": "test.py"})
         assert result == "echo {unknown}"
 
+    def test_shell_injection_escaped(self) -> None:
+        result = _render_command("echo {file_path}", {"file_path": '"; rm -rf /'})
+        assert "rm -rf" not in result or "'" in result
+        # The malicious payload should be safely quoted
+        assert result.startswith("echo ")
+
+    def test_spaces_in_path_quoted(self) -> None:
+        result = _render_command("echo {file_path}", {"file_path": "path with spaces/file.py"})
+        assert "'path with spaces/file.py'" in result
+
 
 class TestRunHooks:
     @pytest.mark.asyncio

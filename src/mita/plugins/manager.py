@@ -110,38 +110,11 @@ class PluginManager:
                 result[pname] = []
         return result
 
-    def register_tools(self, registry: ToolRegistry) -> int:
+    async def register_tools(self, registry: ToolRegistry) -> int:
         """Register all MCP plugin tools into a ToolRegistry.
 
         Must be called after start_all(). Returns the number of tools registered.
         """
-        import asyncio
-
-        loop = asyncio.get_event_loop()
-        count = 0
-
-        for pname, client in self._clients.items():
-            try:
-                tools = loop.run_until_complete(client.list_tools())
-            except (ConnectionError, OSError, RuntimeError):
-                continue
-
-            for tool in tools:
-                tool_name = f"mcp:{pname}/{tool['name']}"
-                definition = ToolDefinition(
-                    name=tool_name,
-                    description=tool["description"],
-                    parameters=_schema_to_parameters(tool.get("inputSchema", {})),
-                    source=f"mcp:{pname}",
-                )
-                handler = _make_mcp_handler(client, tool["name"])
-                registry.register(definition, handler)
-                count += 1
-
-        return count
-
-    async def register_tools_async(self, registry: ToolRegistry) -> int:
-        """Async version of register_tools. Returns the number of tools registered."""
         count = 0
 
         for pname, client in self._clients.items():

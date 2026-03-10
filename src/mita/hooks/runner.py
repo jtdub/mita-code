@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import shlex
 import subprocess
 from typing import Any
 
@@ -47,13 +48,16 @@ def _matches(hook: HookDefinition, context: dict[str, Any] | None) -> bool:
 
 
 def _render_command(command: str, context: dict[str, Any] | None) -> str:
-    """Substitute context variables into a hook command string."""
+    """Substitute context variables into a hook command string.
+
+    Context values are shell-escaped to prevent injection attacks.
+    """
     if context is None:
         return command
 
     rendered = command
     for key, value in context.items():
-        rendered = rendered.replace(f"{{{key}}}", str(value))
+        rendered = rendered.replace(f"{{{key}}}", shlex.quote(str(value)))
     return rendered
 
 
@@ -112,16 +116,25 @@ async def run_hooks(
 async def _execute_hook(command: str, timeout: float = HOOK_TIMEOUT) -> dict[str, Any]:
     """Execute a single hook command asynchronously."""
     try:
+        argv = shlex.split(command)
+    except ValueError as e:
+        return {
+            "command": command,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": f"Invalid hook command syntax: {e}",
+        }
+
+    try:
         result = await asyncio.wait_for(
             asyncio.to_thread(
                 subprocess.run,
-                command,
-                shell=True,
+                argv,
+                shell=False,
                 capture_output=True,
                 text=True,
-                timeout=timeout,
             ),
-            timeout=timeout + 5,  # extra buffer for asyncio
+            timeout=timeout,
         )
         return {
             "command": command,

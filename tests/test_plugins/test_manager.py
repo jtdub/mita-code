@@ -147,7 +147,7 @@ class TestPluginManager:
         assert "web" not in result
 
     @pytest.mark.asyncio
-    async def test_register_tools_async(self) -> None:
+    async def test_register_tools(self) -> None:
         mgr = PluginManager([])
         mock_client = AsyncMock()
         mock_client.list_tools = AsyncMock(
@@ -166,7 +166,7 @@ class TestPluginManager:
         mgr._clients["fs"] = mock_client
 
         registry = ToolRegistry()
-        count = await mgr.register_tools_async(registry)
+        count = await mgr.register_tools(registry)
 
         assert count == 1
         assert registry.has_tool("mcp:fs/read_file")
@@ -257,7 +257,7 @@ class TestPluginManager:
         mgr._clients["greeter"] = mock_client
 
         registry = ToolRegistry()
-        await mgr.register_tools_async(registry)
+        await mgr.register_tools(registry)
 
         from mita.tools.schema import ToolCall
 
