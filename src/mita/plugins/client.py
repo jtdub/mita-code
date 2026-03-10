@@ -43,16 +43,23 @@ class MCPPluginClient:
 
         self._exit_stack = AsyncExitStack()
 
-        if self._plugin.transport == "stdio":
-            await self._connect_stdio(timeout)
-        elif self._plugin.transport == "sse":
-            await self._connect_sse(timeout)
-        else:
-            raise ValueError(f"Unsupported transport: {self._plugin.transport}")
+        try:
+            if self._plugin.transport == "stdio":
+                await self._connect_stdio(timeout)
+            elif self._plugin.transport == "sse":
+                await self._connect_sse(timeout)
+            else:
+                raise ValueError(f"Unsupported transport: {self._plugin.transport}")
+        except Exception:
+            # Clean up resources on connection failure
+            await self._exit_stack.aclose()
+            self._exit_stack = None
+            raise
 
     async def _connect_stdio(self, timeout: float) -> None:
         """Connect via stdio transport (subprocess)."""
-        assert self._exit_stack is not None
+        if self._exit_stack is None:
+            raise RuntimeError("connect() must be called before _connect_stdio()")
 
         if not self._plugin.command:
             raise ValueError(f"Plugin '{self.name}' requires a command for stdio transport")
@@ -77,7 +84,8 @@ class MCPPluginClient:
 
     async def _connect_sse(self, timeout: float) -> None:
         """Connect via SSE transport (HTTP)."""
-        assert self._exit_stack is not None
+        if self._exit_stack is None:
+            raise RuntimeError("connect() must be called before _connect_sse()")
 
         if not self._plugin.url:
             raise ValueError(f"Plugin '{self.name}' requires a url for SSE transport")

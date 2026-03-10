@@ -31,16 +31,33 @@ TOOL_DEF = ToolDefinition(
 )
 
 
+def _safe_int(value: object, default: int, minimum: int = 1) -> int:
+    """Safely convert a value to int with bounds checking."""
+    if value is None:
+        return max(minimum, default)
+    try:
+        result = int(str(value))
+    except (ValueError, TypeError):
+        result = default
+    return max(minimum, result)
+
+
 async def execute(args: dict[str, Any]) -> ToolResult:
     """Read file contents with optional offset and limit."""
     path_str = str(args.get("path", ""))
-    offset = int(args.get("offset", 1) or 1)
-    limit = int(args.get("limit", 2000) or 2000)
+    offset = _safe_int(args.get("offset", 1), default=1)
+    limit = _safe_int(args.get("limit", 2000), default=2000)
 
     if not path_str:
         return ToolResult(tool_call_id="", success=False, error="Missing required parameter: path")
 
     path = Path(path_str).expanduser().resolve()
+
+    from mita.tools.safety import validate_path_for_read
+
+    path_error = validate_path_for_read(path)
+    if path_error:
+        return ToolResult(tool_call_id="", success=False, error=path_error)
 
     if not path.exists():
         return ToolResult(tool_call_id="", success=False, error=f"File not found: {path}")

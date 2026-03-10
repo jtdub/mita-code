@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
 from mita.llm.client import LLMClient
+
+_logger = logging.getLogger(__name__)
 
 
 async def stream_to_terminal(
@@ -29,15 +32,22 @@ async def stream_to_terminal(
     """
     full_text = ""
 
-    async for chunk in client.stream_chat(messages, tools=tools):
-        delta = _extract_delta_content(chunk)
-        if delta:
-            full_text += delta
-            if on_token:
-                on_token(delta)
-
-    if on_complete:
-        on_complete(full_text)
+    try:
+        async for chunk in client.stream_chat(messages, tools=tools):
+            delta = _extract_delta_content(chunk)
+            if delta:
+                full_text += delta
+                if on_token:
+                    try:
+                        on_token(delta)
+                    except Exception:
+                        _logger.warning("on_token callback failed", exc_info=True)
+    finally:
+        if on_complete:
+            try:
+                on_complete(full_text)
+            except Exception:
+                _logger.warning("on_complete callback failed", exc_info=True)
 
     return full_text
 

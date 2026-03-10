@@ -55,6 +55,17 @@ async def execute(args: dict[str, Any]) -> ToolResult:
 
     target = Path(path_str).expanduser().resolve()
 
+    from mita.tools.safety import validate_path_for_read, validate_search_base
+
+    if target.is_file():
+        read_error = validate_path_for_read(target)
+        if read_error:
+            return ToolResult(tool_call_id="", success=False, error=read_error)
+    elif target.is_dir():
+        base_error = validate_search_base(target)
+        if base_error:
+            return ToolResult(tool_call_id="", success=False, error=base_error)
+
     if target.is_file():
         files = [target]
     elif target.is_dir():
