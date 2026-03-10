@@ -34,7 +34,6 @@ from mita.ui.spinner import thinking_spinner
 
 _logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 25
 _RAG_CONTEXT_PREFIX = "Relevant code from the project index:"
 
 
@@ -100,12 +99,18 @@ async def run_agent(
     if config.hooks:
         from mita.hooks.runner import run_hooks
 
-        await run_hooks("session_start", config.hooks, console=console)
+        await run_hooks(
+            "session_start",
+            config.hooks,
+            console=console,
+            timeout=config.hook_settings.timeout,
+        )
 
     # Agent loop
     last_tool_signature: str | None = None
     repeat_count = 0
-    for iteration in range(MAX_ITERATIONS):
+    max_iterations = config.max_iterations
+    for iteration in range(max_iterations):
         try:
             # Truncate to fit context window
             conversation.truncate_to_fit(config.model.context_window)
@@ -200,14 +205,19 @@ async def run_agent(
     else:
         display_error(
             console,
-            f"Reached maximum iterations ({MAX_ITERATIONS}). Stopping.",
+            f"Reached maximum iterations ({max_iterations}). Stopping.",
         )
 
     # Fire session_end hooks
     if config.hooks:
         from mita.hooks.runner import run_hooks
 
-        await run_hooks("session_end", config.hooks, console=console)
+        await run_hooks(
+            "session_end",
+            config.hooks,
+            console=console,
+            timeout=config.hook_settings.timeout,
+        )
 
     return conversation
 
@@ -553,6 +563,7 @@ async def _process_tool_calls(
                 config.hooks,
                 context={"tool": name, "args": arguments},
                 console=console,
+                timeout=config.hook_settings.timeout,
             )
 
         # Create confirm function bound to console
@@ -574,6 +585,7 @@ async def _process_tool_calls(
                 config.hooks,
                 context={"tool": name, "result": str(result.output or result.error)},
                 console=console,
+                timeout=config.hook_settings.timeout,
             )
 
         # Fire on_file_write hooks for file_write/file_edit tools
@@ -587,6 +599,7 @@ async def _process_tool_calls(
                     config.hooks,
                     context={"file_path": file_path},
                     console=console,
+                    timeout=config.hook_settings.timeout,
                 )
 
         # Add tool result to conversation

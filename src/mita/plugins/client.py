@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from contextlib import AsyncExitStack
 from typing import Any
@@ -11,6 +12,8 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from mita.config.schema import PluginDefinition
+
+_logger = logging.getLogger(__name__)
 
 
 class MCPPluginClient:

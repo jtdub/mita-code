@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import logging
 import shlex
 import subprocess
 from typing import Any
@@ -11,6 +12,8 @@ from typing import Any
 from rich.console import Console
 
 from mita.config.schema import HookDefinition
+
+_logger = logging.getLogger(__name__)
 
 # Valid hook events
 VALID_EVENTS = frozenset(

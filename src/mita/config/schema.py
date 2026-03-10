@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class OllamaSettings(BaseModel):
@@ -11,6 +11,13 @@ class OllamaSettings(BaseModel):
     host: str = "http://localhost:11434"
     timeout: int = 120
     auto_manage: bool = True
+
+    @field_validator("timeout")
+    @classmethod
+    def timeout_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("timeout must be positive")
+        return v
 
 
 class OllamaRuntimeOptions(BaseModel):
@@ -46,6 +53,28 @@ class ModelSettings(BaseModel):
     context_window: int = 32768
     ollama_options: OllamaRuntimeOptions = Field(default_factory=OllamaRuntimeOptions)
 
+    @field_validator("max_tokens")
+    @classmethod
+    def max_tokens_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("max_tokens must be positive")
+        return v
+
+    @field_validator("context_window")
+    @classmethod
+    def context_window_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("context_window must be positive")
+        return v
+
+    @model_validator(mode="after")
+    def context_window_gte_max_tokens(self) -> ModelSettings:
+        if self.context_window < self.max_tokens:
+            raise ValueError(
+                f"context_window ({self.context_window}) must be >= max_tokens ({self.max_tokens})"
+            )
+        return self
+
 
 class ToolSettings(BaseModel):
     """Tool execution settings."""
@@ -53,9 +82,18 @@ class ToolSettings(BaseModel):
     auto_approve: list[str] = Field(default_factory=lambda: ["file_read", "glob", "grep"])
     confirm_destructive: bool = True
     shell_timeout: int = 120
+    glob_max_results: int = 500
+    grep_max_matches: int = 200
     banned_commands: list[str] = Field(
         default_factory=lambda: ["rm -rf /", "mkfs", "dd if=/dev/zero"]
     )
+
+    @field_validator("shell_timeout")
+    @classmethod
+    def shell_timeout_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("shell_timeout must be positive")
+        return v
 
 
 class MemorySettings(BaseModel):
@@ -86,6 +124,34 @@ class IndexSettings(BaseModel):
         ]
     )
 
+    @model_validator(mode="after")
+    def chunk_size_gt_overlap(self) -> IndexSettings:
+        if self.chunk_size <= self.chunk_overlap:
+            raise ValueError(
+                f"chunk_size ({self.chunk_size}) must be > chunk_overlap ({self.chunk_overlap})"
+            )
+        return self
+
+    @field_validator("top_k")
+    @classmethod
+    def top_k_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("top_k must be positive")
+        return v
+
+
+class HookSettings(BaseModel):
+    """Hook execution settings."""
+
+    timeout: int = 30
+
+    @field_validator("timeout")
+    @classmethod
+    def timeout_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("hook timeout must be positive")
+        return v
+
 
 class HookDefinition(BaseModel):
     """A lifecycle hook definition."""
@@ -104,6 +170,13 @@ class PluginDefinition(BaseModel):
     args: list[str] = Field(default_factory=list)
     url: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url_format(cls, v: str | None) -> str | None:
+        if v is not None and not v.startswith(("http://", "https://")):
+            raise ValueError(f"Plugin URL must start with http:// or https://, got: {v}")
+        return v
 
 
 class UISettings(BaseModel):
@@ -124,8 +197,17 @@ class MitaConfig(BaseModel):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     index: IndexSettings = Field(default_factory=IndexSettings)
     ui: UISettings = Field(default_factory=UISettings)
+    hook_settings: HookSettings = Field(default_factory=HookSettings)
+    max_iterations: int = 25
     hooks: list[HookDefinition] = Field(default_factory=list)
     plugins: list[PluginDefinition] = Field(default_factory=list)
     skills_paths: list[str] = Field(
         default_factory=lambda: ["~/.config/mita/skills", ".mita/skills"]
     )
+
+    @field_validator("max_iterations")
+    @classmethod
+    def max_iterations_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("max_iterations must be positive")
+        return v

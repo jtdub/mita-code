@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from rich.console import Console
@@ -10,6 +11,8 @@ from mita.config.schema import PluginDefinition
 from mita.plugins.client import MCPPluginClient
 from mita.tools.registry import ToolHandler, ToolRegistry
 from mita.tools.schema import ToolDefinition, ToolParameter, ToolResult
+
+_logger = logging.getLogger(__name__)
 
 
 def _schema_to_parameters(input_schema: dict[str, Any]) -> list[ToolParameter]:

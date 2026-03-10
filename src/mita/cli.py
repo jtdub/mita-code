@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import logging
 import shlex
 import sys
 from io import StringIO
@@ -24,6 +25,8 @@ from mita.models.manager import (
     show_model_info,
     show_recommendations,
 )
+
+_logger = logging.getLogger(__name__)
 
 console = Console()
 
@@ -52,6 +55,14 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _verbose_callback(value: bool) -> None:
+    if value:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        )
+
+
 @app.callback()
 def main(
     version: Annotated[
@@ -61,6 +72,15 @@ def main(
             "-v",
             help="Show version and exit.",
             callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool | None,
+        typer.Option(
+            "--verbose",
+            help="Enable verbose/debug logging.",
+            callback=_verbose_callback,
             is_eager=True,
         ),
     ] = None,
