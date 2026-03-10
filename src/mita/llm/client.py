@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 import litellm
 
 from mita.config.schema import MitaConfig
+
+_logger = logging.getLogger(__name__)
 
 
 class LLMClient:

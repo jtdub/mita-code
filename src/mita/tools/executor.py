@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from mita.config.schema import ToolSettings
 from mita.tools.registry import ToolRegistry
 from mita.tools.safety import is_command_banned, needs_confirmation
 from mita.tools.schema import ToolCall, ToolResult
+
+_logger = logging.getLogger(__name__)
 
 
 async def execute_tool(

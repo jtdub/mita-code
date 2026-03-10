@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
+
+_logger = logging.getLogger(__name__)
 
 
 class SkillFrontmatter(BaseModel):

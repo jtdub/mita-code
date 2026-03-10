@@ -9,7 +9,6 @@ import pytest
 
 from mita.agent.conversation import Conversation, Message, Role
 from mita.agent.loop import (
-    MAX_ITERATIONS,
     _accumulate_tool_call_deltas,
     _extract_delta,
     _extract_tool_calls_from_text,
@@ -194,8 +193,9 @@ class TestRunAgent:
         assert user_msgs[0].content == "test prompt"
 
     @pytest.mark.asyncio()
-    async def test_max_iterations_constant(self) -> None:
-        assert MAX_ITERATIONS == 25
+    async def test_max_iterations_default(self) -> None:
+        cfg = MitaConfig()
+        assert cfg.max_iterations == 25
 
 
 def _make_registry_with_tool(name: str) -> ToolRegistry:
