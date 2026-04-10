@@ -26,6 +26,19 @@ class TestVersionFlag:
         assert result.exit_code == 0
 
 
+class TestChatPermissionFlag:
+    def test_invalid_permission_mode(self) -> None:
+        result = runner.invoke(app, ["chat", "--permission", "yolo"])
+        assert result.exit_code != 0
+        assert "Invalid permission mode" in result.output
+
+    def test_chat_help_shows_permission_flag(self) -> None:
+        result = runner.invoke(app, ["chat", "--help"])
+        assert result.exit_code == 0
+        # Rich may insert ANSI codes between "--" and "permission", so check the word
+        assert "permission" in result.output.lower()
+
+
 # ── Config commands ──────────────────────────────────────────────
 
 

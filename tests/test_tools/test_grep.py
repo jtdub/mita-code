@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
-from mita.tools.builtins.grep_tool import MAX_MATCHES, execute
+from mita.tools.builtins.grep_tool import DEFAULT_MAX_MATCHES as MAX_MATCHES
+from mita.tools.builtins.grep_tool import execute
 
 
 class TestGrepTool:

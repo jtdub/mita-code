@@ -589,6 +589,14 @@ def chat_command(
         bool,
         typer.Option("--no-tools", help="Disable all tools."),
     ] = False,
+    permission: Annotated[
+        str | None,
+        typer.Option(
+            "--permission",
+            "-p",
+            help="Permission mode: ask (default), auto_edit, or trust.",
+        ),
+    ] = None,
 ) -> None:
     """Open an interactive chat session with the agent."""
     import asyncio
@@ -596,12 +604,22 @@ def chat_command(
     from mita.agent.conversation import Conversation
     from mita.agent.loop import run_agent
     from mita.config.loader import load_config as _load_config
+    from mita.config.schema import PermissionMode
     from mita.models.server import ensure_model, ensure_server
     from mita.tools.registry import ToolRegistry, create_default_registry
     from mita.ui.display import get_console
     from mita.ui.repl import repl_loop
 
     cfg = _load_config()
+
+    if permission is not None:
+        try:
+            cfg.tools.permission_mode = PermissionMode(permission)
+        except ValueError:
+            console.print(f"[red]Invalid permission mode: {permission}[/red]")
+            console.print("Valid modes: ask, auto_edit, trust")
+            raise typer.Exit(1)
+
     chat_console = get_console()
 
     if not ensure_server(

@@ -45,6 +45,7 @@ async def run_agent(
     conversation: Conversation | None = None,
     registry: ToolRegistry | None = None,
     llm_client: LLMClient | None = None,
+    session_approved: set[str] | None = None,
 ) -> Conversation:
     """Run the agent loop for a single user prompt.
 
@@ -55,6 +56,8 @@ async def run_agent(
         conversation: Existing conversation to continue, or None to start fresh.
         registry: Tool registry, or None to create default.
         llm_client: LLM client, or None to create from config.
+        session_approved: Tool names approved for the session (skip confirmation).
+            Not mutated by the agent loop — callers manage the set.
 
     Returns:
         The updated conversation.
@@ -191,7 +194,9 @@ async def run_agent(
                         tool_calls=tool_calls_raw,
                     )
                 )
-                await _process_tool_calls(tool_calls_raw, conversation, registry, config, console)
+                await _process_tool_calls(
+                    tool_calls_raw, conversation, registry, config, console, session_approved
+                )
                 continue
 
             # No tool calls — add assistant message and stop
@@ -213,6 +218,12 @@ async def run_agent(
         except json.JSONDecodeError as e:
             _logger.warning("Failed to parse LLM response: %s", e, exc_info=True)
             display_error(console, f"Response parse error: {e}")
+            break
+        except Exception as e:  # noqa: BLE001
+            _logger.error("Unexpected error in agent loop: %s", e, exc_info=True)
+            display_error(console, f"Unexpected error: {e}")
+            if assistant_text:
+                conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
             break
     else:
         display_error(
@@ -524,6 +535,7 @@ async def _process_tool_calls(
     registry: ToolRegistry,
     config: MitaConfig,
     console: Console,
+    session_approved: set[str] | None = None,
 ) -> None:
     """Process tool calls from an LLM response."""
     # Import hooks runner once if hooks are configured
@@ -568,7 +580,13 @@ async def _process_tool_calls(
             return await prompt_user_confirm(console, prompt)
 
         # Execute with safety checks
-        result = await execute_tool(tool_call, registry, config.tools, confirm_fn=confirm_fn)
+        result = await execute_tool(
+            tool_call,
+            registry,
+            config.tools,
+            confirm_fn=confirm_fn,
+            session_approved=session_approved,
+        )
 
         # Display result
         display_tool_result(console, result)
