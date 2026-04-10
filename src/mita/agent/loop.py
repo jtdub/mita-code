@@ -56,6 +56,8 @@ async def run_agent(
         conversation: Existing conversation to continue, or None to start fresh.
         registry: Tool registry, or None to create default.
         llm_client: LLM client, or None to create from config.
+        session_approved: Tool names approved for the session (skip confirmation).
+            Not mutated by the agent loop — callers manage the set.
 
     Returns:
         The updated conversation.

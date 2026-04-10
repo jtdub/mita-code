@@ -34,7 +34,10 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     """Search for files matching a glob pattern."""
     pattern = str(args.get("pattern", ""))
     base_path = str(args.get("path", ".") or ".")
-    max_results = int(args.get("_max_results", DEFAULT_MAX_RESULTS))
+    try:
+        max_results = max(1, int(args.get("_max_results", DEFAULT_MAX_RESULTS)))
+    except (TypeError, ValueError):
+        max_results = DEFAULT_MAX_RESULTS
 
     if not pattern:
         return ToolResult(

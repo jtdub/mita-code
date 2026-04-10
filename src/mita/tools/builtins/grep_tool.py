@@ -42,7 +42,10 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     pattern_str = str(args.get("pattern", ""))
     path_str = str(args.get("path", ".") or ".")
     include = args.get("include")
-    max_matches = int(args.get("_max_matches", DEFAULT_MAX_MATCHES))
+    try:
+        max_matches = max(1, int(args.get("_max_matches", DEFAULT_MAX_MATCHES)))
+    except (TypeError, ValueError):
+        max_matches = DEFAULT_MAX_MATCHES
 
     if not pattern_str:
         return ToolResult(

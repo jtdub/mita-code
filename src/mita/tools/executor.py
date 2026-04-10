@@ -78,9 +78,9 @@ async def execute_tool(
             )
 
     if tool_call.name == "glob":
-        tool_call.arguments.setdefault("_max_results", settings.glob_max_results)
+        tool_call.arguments["_max_results"] = settings.glob_max_results
     elif tool_call.name == "grep":
-        tool_call.arguments.setdefault("_max_matches", settings.grep_max_matches)
+        tool_call.arguments["_max_matches"] = settings.grep_max_matches
 
     return await registry.execute(tool_call)
 

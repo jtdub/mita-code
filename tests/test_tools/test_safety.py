@@ -157,13 +157,22 @@ class TestNeedsConfirmation:
         tool_def = ToolDefinition(name="git", description="git", parameters=[], destructive=False)
         assert needs_confirmation(call, tool_def, settings) is False
 
-    @pytest.mark.parametrize("subcmd", ["status", "diff", "log --oneline", "show", "branch"])
+    @pytest.mark.parametrize("subcmd", ["status", "diff", "log --oneline", "show", "branch --list"])
     def test_git_read_only_commands_skip_confirm(self, subcmd: str) -> None:
         """Read-only git subcommands should not require confirmation (#58)."""
         settings = ToolSettings()
         call = ToolCall(id="1", name="git", arguments={"subcommand": subcmd})
         tool_def = ToolDefinition(name="git", description="git", parameters=[], destructive=False)
         assert needs_confirmation(call, tool_def, settings) is False
+
+    @pytest.mark.parametrize("subcmd", ["branch -D feature", "branch -d feature"])
+    def test_git_destructive_branch_still_confirms(self, subcmd: str) -> None:
+        """Destructive branch commands must require confirmation even though
+        'branch' is in SAFE_SUBCOMMANDS — destructive check runs first."""
+        settings = ToolSettings()
+        call = ToolCall(id="1", name="git", arguments={"subcommand": subcmd})
+        tool_def = ToolDefinition(name="git", description="git", parameters=[], destructive=False)
+        assert needs_confirmation(call, tool_def, settings) is True
 
     def test_auto_edit_mode_approves_writes(self) -> None:
         """In auto_edit mode, file_write should not require confirmation."""

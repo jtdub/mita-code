@@ -144,10 +144,12 @@ def needs_confirmation(
 
     if tool_call.name == "git":
         subcommand = tool_call.arguments.get("subcommand", "")
-        if is_safe_git_command(subcommand):
-            return False
+        # Check destructive FIRST — `branch -D` starts with "branch" (a safe
+        # base subcommand) but is destructive due to the -D flag.
         if is_git_command_destructive(subcommand):
             return True
+        if is_safe_git_command(subcommand):
+            return False
 
     return False
 
