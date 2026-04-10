@@ -4,11 +4,13 @@ from invoke import Context, task
 
 
 @task
-def test(c: Context, verbose: bool = False) -> None:
-    """Run tests with pytest."""
+def test(c: Context, verbose: bool = False, no_cov: bool = False) -> None:
+    """Run tests with pytest and coverage."""
     cmd = "poetry run pytest tests/"
     if verbose:
         cmd += " -v"
+    if no_cov:
+        cmd += " --no-cov"
     c.run(cmd, pty=True)
 
 
