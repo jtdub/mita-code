@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from mita.tools.builtins.file_edit import execute as file_edit
@@ -36,8 +38,18 @@ class TestFileRead:
         assert "c" in result.output
 
     @pytest.mark.asyncio()
-    async def test_read_nonexistent(self) -> None:
+    async def test_read_outside_workspace_blocked(self) -> None:
         result = await file_read({"path": "/nonexistent/file.txt"})
+        assert result.success is False
+        assert "access denied" in (result.error or "").lower()
+
+    @pytest.mark.asyncio()
+    async def test_read_nonexistent_in_workspace(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        missing = tmp_path / "does_not_exist.txt"
+        with patch("mita.tools.safety._workspace_root_override", tmp_path):
+            result = await file_read({"path": str(missing)})
         assert result.success is False
         assert "not found" in (result.error or "").lower()
 

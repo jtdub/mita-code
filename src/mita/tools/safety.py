@@ -42,28 +42,58 @@ DESTRUCTIVE_GIT_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^branch\s+-[dD]\b", re.IGNORECASE),
 ]
 
+# Shell command prefixes that should be skipped when extracting the actual command
+COMMAND_PREFIXES: frozenset[str] = frozenset({"sudo", "env", "nohup", "nice", "time", "strace"})
+
+# Split shell pipelines and chains — longer operators first to avoid partial matches
+_SHELL_OPERATOR_RE = re.compile(r"&&|\|\||[|;&]")
+
+
+def _tokenize(command: str) -> list[str]:
+    """Tokenize a shell command, falling back to whitespace split on parse errors."""
+    try:
+        return shlex.split(command.strip())
+    except ValueError:
+        return command.strip().split()
+
 
 def _normalize_command(command: str) -> str:
     """Normalize a command for comparison by tokenizing and rejoining."""
-    try:
-        tokens = shlex.split(command.strip())
-    except ValueError:
-        # If shlex can't parse it, fall back to whitespace normalization
-        tokens = command.strip().split()
-    return " ".join(tokens)
+    return " ".join(_tokenize(command))
+
+
+def _extract_command_names(command: str) -> set[str]:
+    """Extract base command names from a shell command, handling pipes and chains."""
+    segments = _SHELL_OPERATOR_RE.split(command)
+    names: set[str] = set()
+    for segment in segments:
+        for token in _tokenize(segment):
+            if "=" in token:
+                continue
+            if token in COMMAND_PREFIXES:
+                continue
+            names.add(token)
+            break
+    return names
 
 
 def is_command_banned(command: str, banned_commands: list[str]) -> bool:
     """Check if a shell command matches any banned command pattern.
 
-    Uses both substring matching on the raw command and token-normalized
-    matching for robustness against whitespace/quoting variations.
+    Uses multiple strategies:
+    1. Substring matching on the raw and normalized command (catches exact phrases)
+    2. Parsed command name matching (catches the command regardless of flags)
     """
     raw = command.strip()
     normalized = _normalize_command(raw)
+    cmd_names = _extract_command_names(raw)
+
     for banned in banned_commands:
         banned_norm = _normalize_command(banned)
         if banned in raw or banned_norm in normalized:
+            return True
+        banned_names = _extract_command_names(banned)
+        if banned_names and banned_names.issubset(cmd_names):
             return True
     return False
 
@@ -101,13 +131,11 @@ def needs_confirmation(
     if tool_def.destructive:
         return True
 
-    # Extra check for shell commands that look destructive
     if tool_call.name == "shell":
         command = tool_call.arguments.get("command", "")
         if is_command_destructive(command):
             return True
 
-    # Check git subcommands for destructive operations
     if tool_call.name == "git":
         subcommand = tool_call.arguments.get("subcommand", "")
         if is_git_command_destructive(subcommand):
@@ -148,15 +176,31 @@ def _is_sensitive_path(resolved: Path) -> bool:
     return False
 
 
+def _check_within_workspace(resolved: Path, operation: str) -> str | None:
+    """Check that a resolved path is within the workspace root.
+
+    Returns an error message if the path is outside the workspace, or None if allowed.
+    """
+    workspace = get_workspace_root().resolve()
+    try:
+        resolved.relative_to(workspace)
+    except ValueError:
+        return (
+            f"Access denied: {resolved} is outside the workspace ({workspace}). "
+            f"{operation} are restricted to the project directory."
+        )
+    return None
+
+
 def validate_path_for_read(resolved: Path) -> str | None:
     """Validate a resolved path is safe to read.
 
     Returns an error message if blocked, or None if allowed.
-    Blocks access to known sensitive paths (SSH keys, credentials).
+    Blocks access to known sensitive paths and paths outside the workspace.
     """
     if _is_sensitive_path(resolved):
         return f"Access denied: {resolved} is a sensitive file"
-    return None
+    return _check_within_workspace(resolved, "File reads")
 
 
 def validate_path_for_write(resolved: Path) -> str | None:
@@ -167,16 +211,7 @@ def validate_path_for_write(resolved: Path) -> str | None:
     """
     if _is_sensitive_path(resolved):
         return f"Access denied: {resolved} is a sensitive file"
-
-    workspace = get_workspace_root().resolve()
-    try:
-        resolved.relative_to(workspace)
-    except ValueError:
-        return (
-            f"Access denied: {resolved} is outside the workspace ({workspace}). "
-            "File writes are restricted to the project directory."
-        )
-    return None
+    return _check_within_workspace(resolved, "File writes")
 
 
 def validate_search_base(resolved: Path) -> str | None:
@@ -185,12 +220,4 @@ def validate_search_base(resolved: Path) -> str | None:
     Returns an error message if blocked, or None if allowed.
     Search bases are restricted to the workspace root and its subdirectories.
     """
-    workspace = get_workspace_root().resolve()
-    try:
-        resolved.relative_to(workspace)
-    except ValueError:
-        return (
-            f"Access denied: {resolved} is outside the workspace ({workspace}). "
-            "Searches are restricted to the project directory."
-        )
-    return None
+    return _check_within_workspace(resolved, "Searches")

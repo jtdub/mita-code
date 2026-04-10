@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 from mita.config.schema import ToolSettings
 from mita.tools.safety import (
+    _extract_command_names,
     is_command_banned,
     is_command_destructive,
     is_git_command_destructive,
     needs_confirmation,
+    validate_path_for_read,
+    validate_path_for_write,
+    validate_search_base,
 )
 from mita.tools.schema import ToolCall, ToolDefinition
 
@@ -26,6 +33,47 @@ class TestIsCommandBanned:
 
     def test_empty_banned_list(self) -> None:
         assert is_command_banned("rm -rf /", []) is False
+
+    def test_piped_command_detected(self) -> None:
+        """Banned command in a pipeline should be caught."""
+        assert is_command_banned("find / -type f | xargs rm", ["rm"]) is True
+
+    def test_chained_command_detected(self) -> None:
+        """Banned command after && should be caught."""
+        assert is_command_banned("echo hello && rm -rf /", ["rm"]) is True
+
+    def test_sudo_prefix_detected(self) -> None:
+        """Banned command after sudo should be caught."""
+        assert is_command_banned("sudo rm -rf /", ["rm"]) is True
+
+    def test_env_prefix_detected(self) -> None:
+        """Banned command after env vars should be caught."""
+        assert is_command_banned("FOO=bar rm -rf /", ["rm"]) is True
+
+    def test_command_name_matching(self) -> None:
+        """Banning 'mkfs' should catch mkfs with any flags."""
+        assert is_command_banned("mkfs -t ext4 /dev/sda1", ["mkfs"]) is True
+
+    def test_command_name_no_false_positive(self) -> None:
+        """Banning 'rm' should not catch 'grep' just because 'rm' is a substring."""
+        assert is_command_banned("grep 'rm -rf' logfile.txt", ["rm -rf /"]) is False
+
+
+class TestExtractCommandNames:
+    def test_simple_command(self) -> None:
+        assert _extract_command_names("ls -la") == {"ls"}
+
+    def test_piped_commands(self) -> None:
+        assert _extract_command_names("cat file | grep pattern") == {"cat", "grep"}
+
+    def test_chained_commands(self) -> None:
+        assert _extract_command_names("cd /tmp && rm -rf *") == {"cd", "rm"}
+
+    def test_sudo_prefix(self) -> None:
+        assert _extract_command_names("sudo rm -rf /") == {"rm"}
+
+    def test_env_var_prefix(self) -> None:
+        assert _extract_command_names("FOO=bar python script.py") == {"python"}
 
 
 class TestIsCommandDestructive:
@@ -140,3 +188,72 @@ class TestIsGitCommandDestructive:
     )
     def test_safe_git_commands(self, subcmd: str) -> None:
         assert is_git_command_destructive(subcmd) is False
+
+
+class TestValidatePathForRead:
+    def test_path_inside_workspace(self, tmp_path: Path) -> None:
+        target = tmp_path / "file.txt"
+        target.touch()
+        with patch("mita.tools.safety._workspace_root_override", tmp_path):
+            assert validate_path_for_read(target.resolve()) is None
+
+    def test_path_outside_workspace_blocked(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        outside = tmp_path / "outside" / "secret.txt"
+        outside.parent.mkdir()
+        outside.touch()
+        with patch("mita.tools.safety._workspace_root_override", workspace):
+            error = validate_path_for_read(outside.resolve())
+            assert error is not None
+            assert "outside the workspace" in error
+
+    def test_sensitive_path_blocked(self, tmp_path: Path) -> None:
+        ssh_key = Path.home() / ".ssh" / "id_rsa"
+        with patch("mita.tools.safety._workspace_root_override", tmp_path):
+            error = validate_path_for_read(ssh_key)
+            assert error is not None
+            assert "sensitive" in error
+
+    def test_etc_passwd_blocked(self, tmp_path: Path) -> None:
+        with patch("mita.tools.safety._workspace_root_override", tmp_path):
+            error = validate_path_for_read(Path("/etc/passwd"))
+            assert error is not None
+            assert "outside the workspace" in error
+
+
+class TestValidatePathForWrite:
+    def test_path_inside_workspace(self, tmp_path: Path) -> None:
+        target = tmp_path / "new_file.txt"
+        with patch("mita.tools.safety._workspace_root_override", tmp_path):
+            assert validate_path_for_write(target.resolve()) is None
+
+    def test_path_outside_workspace_blocked(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        outside = tmp_path / "outside" / "file.txt"
+        with patch("mita.tools.safety._workspace_root_override", workspace):
+            error = validate_path_for_write(outside.resolve())
+            assert error is not None
+            assert "outside the workspace" in error
+
+    def test_sensitive_path_blocked(self, tmp_path: Path) -> None:
+        ssh_key = Path.home() / ".ssh" / "id_rsa"
+        with patch("mita.tools.safety._workspace_root_override", tmp_path):
+            error = validate_path_for_write(ssh_key)
+            assert error is not None
+            assert "sensitive" in error
+
+
+class TestValidateSearchBase:
+    def test_base_inside_workspace(self, tmp_path: Path) -> None:
+        with patch("mita.tools.safety._workspace_root_override", tmp_path):
+            assert validate_search_base(tmp_path.resolve()) is None
+
+    def test_base_outside_workspace_blocked(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        with patch("mita.tools.safety._workspace_root_override", workspace):
+            error = validate_search_base(tmp_path.resolve())
+            assert error is not None
+            assert "outside the workspace" in error
