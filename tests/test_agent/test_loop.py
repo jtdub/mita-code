@@ -15,31 +15,8 @@ from mita.agent.loop import (
     run_agent,
 )
 from mita.config.schema import MitaConfig
-from mita.llm.streaming import extract_delta_content
 from mita.tools.registry import ToolRegistry, create_default_registry
 from mita.tools.schema import ToolDefinition, ToolParameter, ToolResult
-
-
-class TestExtractDelta:
-    def test_object_chunk(self) -> None:
-        class Delta:
-            content = "hello"
-
-        class Choice:
-            delta = Delta()
-
-        class Chunk:
-            choices = [Choice()]
-
-        assert extract_delta_content(Chunk()) == "hello"
-
-    def test_dict_chunk(self) -> None:
-        chunk = {"choices": [{"delta": {"content": "world"}}]}
-        assert extract_delta_content(chunk) == "world"
-
-    def test_empty(self) -> None:
-        assert extract_delta_content({}) == ""
-        assert extract_delta_content({"choices": []}) == ""
 
 
 class TestParseResponse:

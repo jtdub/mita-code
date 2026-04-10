@@ -31,9 +31,16 @@ def toml_value(v: object) -> str:
 
 def dict_to_toml(data: dict, lines: list[str], prefix: str) -> None:  # type: ignore[type-arg]
     """Recursively format a dict as TOML lines."""
-    scalars = {k: v for k, v in data.items() if not isinstance(v, (dict, list))}
-    dicts = {k: v for k, v in data.items() if isinstance(v, dict)}
-    lists = {k: v for k, v in data.items() if isinstance(v, list)}
+    scalars: dict[str, object] = {}
+    dicts: dict[str, dict] = {}  # type: ignore[type-arg]
+    lists: dict[str, list] = {}  # type: ignore[type-arg]
+    for k, v in data.items():
+        if isinstance(v, dict):
+            dicts[k] = v
+        elif isinstance(v, list):
+            lists[k] = v
+        else:
+            scalars[k] = v
 
     for k, v in scalars.items():
         lines.append(f"{k} = {toml_value(v)}")
@@ -62,9 +69,10 @@ def write_toml(path: Path, data: dict) -> None:  # type: ignore[type-arg]
 
 def config_to_toml(cfg: object) -> str:
     """Convert a MitaConfig to a TOML-formatted string for display."""
-    from mita.config.schema import MitaConfig
+    from mita.config.schema import MitaConfig  # avoid circular import
 
-    assert isinstance(cfg, MitaConfig)
+    if not isinstance(cfg, MitaConfig):
+        raise TypeError(f"Expected MitaConfig, got {type(cfg).__name__}")
     data = cfg.model_dump()
     lines: list[str] = []
     dict_to_toml(data, lines, prefix="")

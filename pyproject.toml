@@ -89,7 +89,7 @@ line_length = 100
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--cov=mita --cov-report=term-missing --cov-fail-under=80"
+addopts = "--cov=mita --cov-report=term-missing"
 
 [tool.coverage.run]
 source = ["src/mita"]

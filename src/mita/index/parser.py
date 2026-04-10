@@ -10,6 +10,9 @@ from typing import Any
 from mita.config.schema import IndexSettings
 from mita.index.store import CodeChunk
 
+# Rough estimate: ~4 characters per token for budget calculations
+CHARS_PER_TOKEN = 4
+
 # Extension → tree-sitter language name
 EXTENSION_MAP: dict[str, str] = {
     ".py": "python",
@@ -200,7 +203,7 @@ def _parse_with_treesitter(
         symbol = _extract_symbol(node, language)
 
         # Split large nodes
-        char_budget = config.chunk_size * 4  # ~4 chars per token
+        char_budget = config.chunk_size * CHARS_PER_TOKEN  # ~4 chars per token
         if len(node_content) > char_budget:
             sub_chunks = _split_large_content(
                 node_content, start_line, rel_path, language, symbol, config
@@ -286,8 +289,8 @@ def _split_large_content(
 ) -> list[CodeChunk]:
     """Split a large chunk into overlapping sub-chunks."""
     lines = content.split("\n")
-    char_budget = config.chunk_size * 4
-    overlap_chars = config.chunk_overlap * 4
+    char_budget = config.chunk_size * CHARS_PER_TOKEN
+    overlap_chars = config.chunk_overlap * CHARS_PER_TOKEN
     chunks: list[CodeChunk] = []
 
     for start, end in _compute_line_windows(lines, char_budget, overlap_chars):
@@ -314,8 +317,8 @@ def _chunk_by_lines(
 ) -> list[CodeChunk]:
     """Fallback: chunk file by line windows."""
     lines = content.split("\n")
-    char_budget = config.chunk_size * 4
-    overlap_chars = config.chunk_overlap * 4
+    char_budget = config.chunk_size * CHARS_PER_TOKEN
+    overlap_chars = config.chunk_overlap * CHARS_PER_TOKEN
     chunks: list[CodeChunk] = []
 
     for start, end in _compute_line_windows(lines, char_budget, overlap_chars):

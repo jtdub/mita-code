@@ -11,16 +11,13 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from mita.config.loader import load_config
+from mita.index import get_index_dir
 from mita.index.embeddings import EmbeddingClient
 from mita.index.parser import parse_codebase
 from mita.index.retriever import Retriever
 from mita.index.store import IndexStore
 
 console = Console()
-
-
-def _get_index_dir() -> Path:
-    return Path.cwd() / ".mita" / "index"
 
 
 async def build_index(force: bool = False, pull_model_fn: object | None = None) -> None:
@@ -33,7 +30,7 @@ async def build_index(force: bool = False, pull_model_fn: object | None = None) 
             so it can import from mita.models without violating dependency rules.
     """
     config = load_config()
-    index_dir = _get_index_dir()
+    index_dir = get_index_dir()
     store = IndexStore(index_dir)
 
     # Check if index already exists
@@ -123,7 +120,7 @@ async def build_index(force: bool = False, pull_model_fn: object | None = None) 
 async def show_index_status() -> None:
     """Show index statistics."""
     config = load_config()
-    store = IndexStore(_get_index_dir())
+    store = IndexStore(get_index_dir())
     stats = await store.status()
 
     if not stats["exists"]:
@@ -135,7 +132,7 @@ async def show_index_status() -> None:
     table.add_column("Value")
     table.add_row("Chunks", str(stats["chunks"]))
     table.add_row("Files", str(stats["files"]))
-    table.add_row("Location", str(_get_index_dir()))
+    table.add_row("Location", str(get_index_dir()))
     table.add_row("Embedding model", config.model.embedding)
     console.print(table)
 
@@ -143,7 +140,7 @@ async def show_index_status() -> None:
 async def search_index(query: str, top_k: int = 10) -> None:
     """Search the index and display results."""
     config = load_config()
-    retriever = Retriever(config, index_dir=_get_index_dir())
+    retriever = Retriever(config, index_dir=get_index_dir())
 
     if not retriever.is_available():
         console.print("[yellow]No index found. Run 'mita index build' first.[/yellow]")
@@ -169,7 +166,7 @@ async def search_index(query: str, top_k: int = 10) -> None:
 
 async def clear_index() -> None:
     """Clear the index."""
-    store = IndexStore(_get_index_dir())
+    store = IndexStore(get_index_dir())
 
     if not store.exists():
         console.print("[yellow]No index found.[/yellow]")

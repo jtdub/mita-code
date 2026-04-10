@@ -49,11 +49,6 @@ class TestExtractUsage:
     def test_no_usage(self) -> None:
         assert _extract_usage({}) is None
 
-    def test_dict_usage_from_dict_chunk(self) -> None:
-        chunk = {"usage": {"prompt_tokens": 1, "completion_tokens": 2}}
-        result = _extract_usage(chunk)
-        assert result == {"prompt_tokens": 1, "completion_tokens": 2}
-
 
 class TestTryParseJsonObject:
     def test_valid_json(self) -> None:

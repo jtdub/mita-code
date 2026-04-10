@@ -29,25 +29,12 @@ def add_hook(event: str, command: str, match: str | None = None) -> None:
         console.print(f"Valid events: {', '.join(sorted(VALID_EVENTS))}")
         return
 
-    from pathlib import Path
+    from mita.config.defaults import ensure_project_config_path
 
-    from mita.config.defaults import (
-        PROJECT_CONFIG_DIR,
-        PROJECT_CONFIG_FILE,
-        _find_project_root,
-        get_project_config_path,
-    )
-
-    project_path = get_project_config_path()
+    project_path = ensure_project_config_path()
     if not project_path:
-        root = _find_project_root(Path.cwd())
-        if root is None:
-            console.print("[red]Not in a project directory (no .git or .mita/).[/red]")
-            return
-        config_dir = root / PROJECT_CONFIG_DIR
-        config_dir.mkdir(exist_ok=True)
-        project_path = config_dir / PROJECT_CONFIG_FILE
-        project_path.touch()
+        console.print("[red]Not in a project directory (no .git or .mita/).[/red]")
+        return
 
     from mita.config.toml_writer import escape_toml_string
 

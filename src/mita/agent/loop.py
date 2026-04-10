@@ -73,7 +73,6 @@ async def run_agent(
     conversation.add(Message(role=Role.USER, content=user_prompt))
 
     # Inject RAG context if index is available (replace previous RAG message)
-    # Create the retriever once per call rather than per-iteration
     retriever = None
     if config.index.enabled:
         try:
@@ -114,7 +113,6 @@ async def run_agent(
     repeat_count = 0
     max_iterations = config.max_iterations
     assistant_text = ""
-    # Compute tool schemas once — they don't change between iterations
     tool_schemas = registry.get_openai_schemas()
     for _iteration in range(max_iterations):
         try:
@@ -257,13 +255,12 @@ async def _stream_response(
     Returns:
         Tuple of (text_content, tool_calls_raw, stats).
     """
-    full_text = ""
+    text_parts: list[str] = []
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
     first_token = True
     stats = _ResponseStats()
     start_time = time.monotonic()
 
-    # Show spinner while waiting for first token; use ExitStack for safe cleanup
     spinner_stack = contextlib.ExitStack()
     spinner_stack.enter_context(thinking_spinner(console))
 
@@ -276,27 +273,24 @@ async def _stream_response(
 
             delta = extract_delta_content(chunk)
             if delta:
-                full_text += delta
+                text_parts.append(delta)
                 display_streaming_token(console, delta)
 
-            # Accumulate tool call deltas
             _accumulate_tool_call_deltas(chunk, tool_calls_by_index)
 
-            # Extract usage from final chunk (LiteLLM includes it on the last chunk)
             usage = _extract_usage(chunk)
             if usage:
                 stats.prompt_tokens = usage.get("prompt_tokens", 0)
                 stats.completion_tokens = usage.get("completion_tokens", 0)
     finally:
-        # Ensure spinner is cleaned up even on exception or empty stream
         spinner_stack.close()
 
     stats.total_time = time.monotonic() - start_time
+    full_text = "".join(text_parts)
 
     if full_text:
         display_streaming_end(console)
 
-    # Convert accumulated tool calls to list
     tool_calls_raw = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
     return full_text, tool_calls_raw, stats
 

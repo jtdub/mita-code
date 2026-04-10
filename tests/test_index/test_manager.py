@@ -15,7 +15,7 @@ class TestBuildIndex:
     async def test_already_exists_no_force(self) -> None:
         with (
             patch("mita.index.manager.load_config"),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.console") as mock_console,
         ):
@@ -30,7 +30,7 @@ class TestBuildIndex:
     async def test_model_not_available_no_callback(self) -> None:
         with (
             patch("mita.index.manager.load_config"),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.EmbeddingClient") as mock_emb_cls,
             patch("mita.index.manager.console") as mock_console,
@@ -49,7 +49,7 @@ class TestBuildIndex:
     async def test_model_not_available_with_callback_declines(self) -> None:
         with (
             patch("mita.index.manager.load_config"),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.EmbeddingClient") as mock_emb_cls,
             patch("mita.index.manager.console"),
@@ -70,7 +70,7 @@ class TestBuildIndex:
     async def test_no_chunks_found(self) -> None:
         with (
             patch("mita.index.manager.load_config"),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.EmbeddingClient") as mock_emb_cls,
             patch("mita.index.manager.parse_codebase", return_value=[]),
@@ -101,7 +101,7 @@ class TestBuildIndex:
         ]
         with (
             patch("mita.index.manager.load_config"),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.EmbeddingClient") as mock_emb_cls,
             patch("mita.index.manager.parse_codebase", return_value=chunks),
@@ -136,7 +136,7 @@ class TestBuildIndex:
         ]
         with (
             patch("mita.index.manager.load_config"),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.EmbeddingClient") as mock_emb_cls,
             patch("mita.index.manager.parse_codebase", return_value=chunks),
@@ -161,7 +161,7 @@ class TestShowIndexStatus:
     async def test_no_index(self) -> None:
         with (
             patch("mita.index.manager.load_config"),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.console") as mock_console,
         ):
@@ -179,7 +179,7 @@ class TestShowIndexStatus:
         config = MitaConfig()
         with (
             patch("mita.index.manager.load_config", return_value=config),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.console") as mock_console,
         ):
@@ -196,7 +196,7 @@ class TestSearchIndex:
     async def test_no_index(self) -> None:
         with (
             patch("mita.index.manager.load_config"),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.Retriever") as mock_ret_cls,
             patch("mita.index.manager.console") as mock_console,
         ):
@@ -211,7 +211,7 @@ class TestSearchIndex:
     async def test_no_results(self) -> None:
         with (
             patch("mita.index.manager.load_config"),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.Retriever") as mock_ret_cls,
             patch("mita.index.manager.console") as mock_console,
         ):
@@ -239,7 +239,7 @@ class TestSearchIndex:
 
         with (
             patch("mita.index.manager.load_config"),
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.Retriever") as mock_ret_cls,
             patch("mita.index.manager.console") as mock_console,
         ):
@@ -256,7 +256,7 @@ class TestClearIndex:
     @pytest.mark.asyncio()
     async def test_no_index(self) -> None:
         with (
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.console") as mock_console,
         ):
@@ -270,7 +270,7 @@ class TestClearIndex:
     @pytest.mark.asyncio()
     async def test_confirm_yes(self) -> None:
         with (
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.console") as mock_console,
         ):
@@ -286,7 +286,7 @@ class TestClearIndex:
     @pytest.mark.asyncio()
     async def test_confirm_no(self) -> None:
         with (
-            patch("mita.index.manager._get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
             patch("mita.index.manager.console") as mock_console,
         ):
