@@ -69,7 +69,7 @@ async def execute_tool(
             )
 
         prompt = f"Allow {tool_call.name}({_summarize_args(tool_call)})?"
-        approved = await confirm_fn(prompt)  # type: ignore[operator]
+        approved = await confirm_fn(prompt)
         if not approved:
             return ToolResult(
                 tool_call_id=tool_call.id,

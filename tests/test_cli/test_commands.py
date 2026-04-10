@@ -35,7 +35,8 @@ class TestChatPermissionFlag:
     def test_chat_help_shows_permission_flag(self) -> None:
         result = runner.invoke(app, ["chat", "--help"])
         assert result.exit_code == 0
-        assert "--permission" in result.output
+        # Rich may insert ANSI codes between "--" and "permission", so check the word
+        assert "permission" in result.output.lower()
 
 
 # ── Config commands ──────────────────────────────────────────────
