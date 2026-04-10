@@ -157,6 +157,67 @@ class TestNeedsConfirmation:
         tool_def = ToolDefinition(name="git", description="git", parameters=[], destructive=False)
         assert needs_confirmation(call, tool_def, settings) is False
 
+    @pytest.mark.parametrize("subcmd", ["status", "diff", "log --oneline", "show", "branch"])
+    def test_git_read_only_commands_skip_confirm(self, subcmd: str) -> None:
+        """Read-only git subcommands should not require confirmation (#58)."""
+        settings = ToolSettings()
+        call = ToolCall(id="1", name="git", arguments={"subcommand": subcmd})
+        tool_def = ToolDefinition(name="git", description="git", parameters=[], destructive=False)
+        assert needs_confirmation(call, tool_def, settings) is False
+
+    def test_auto_edit_mode_approves_writes(self) -> None:
+        """In auto_edit mode, file_write should not require confirmation."""
+        from mita.config.schema import PermissionMode
+
+        settings = ToolSettings(permission_mode=PermissionMode.AUTO_EDIT)
+        call = self._make_call(name="file_write")
+        tool_def = self._make_tool_def(destructive=True)
+        assert needs_confirmation(call, tool_def, settings) is False
+
+    def test_auto_edit_mode_still_confirms_shell(self) -> None:
+        """In auto_edit mode, shell should still require confirmation."""
+        from mita.config.schema import PermissionMode
+
+        settings = ToolSettings(permission_mode=PermissionMode.AUTO_EDIT)
+        call = ToolCall(id="1", name="shell", arguments={"command": "rm -rf /tmp"})
+        tool_def = ToolDefinition(
+            name="shell", description="shell", parameters=[], destructive=True
+        )
+        assert needs_confirmation(call, tool_def, settings) is True
+
+    def test_trust_mode_approves_everything(self) -> None:
+        """In trust mode, even destructive shell commands should be auto-approved."""
+        from mita.config.schema import PermissionMode
+
+        settings = ToolSettings(permission_mode=PermissionMode.TRUST)
+        call = ToolCall(id="1", name="shell", arguments={"command": "rm -rf /"})
+        tool_def = ToolDefinition(
+            name="shell", description="shell", parameters=[], destructive=True
+        )
+        assert needs_confirmation(call, tool_def, settings) is False
+
+    def test_session_approved_skips_confirm(self) -> None:
+        """Tools in session_approved set should skip confirmation."""
+        settings = ToolSettings()
+        call = self._make_call(name="file_write")
+        tool_def = self._make_tool_def(destructive=True)
+        result = needs_confirmation(call, tool_def, settings, session_approved={"file_write"})
+        assert result is False
+
+    def test_session_approved_does_not_affect_other_tools(self) -> None:
+        """Session approval for one tool should not approve another."""
+        settings = ToolSettings()
+        call = self._make_call(name="danger_tool")
+        tool_def = self._make_tool_def(destructive=True)
+        assert needs_confirmation(call, tool_def, settings, session_approved={"file_write"}) is True
+
+    def test_session_approved_none_has_no_effect(self) -> None:
+        """Passing session_approved=None should behave like no session approvals."""
+        settings = ToolSettings()
+        call = self._make_call(name="file_write")
+        tool_def = self._make_tool_def(destructive=True)
+        assert needs_confirmation(call, tool_def, settings, session_approved=None) is True
+
 
 class TestIsGitCommandDestructive:
     @pytest.mark.parametrize(

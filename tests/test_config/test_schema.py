@@ -4,10 +4,12 @@ import pytest
 from pydantic import ValidationError
 
 from mita.config.schema import (
+    PERMISSION_MODE_TOOLS,
     IndexSettings,
     MitaConfig,
     ModelSettings,
     OllamaSettings,
+    PermissionMode,
     PluginDefinition,
     ToolSettings,
 )
@@ -96,3 +98,55 @@ class TestValidators:
     def test_max_iterations_positive(self) -> None:
         with pytest.raises(ValidationError, match="max_iterations must be positive"):
             MitaConfig(max_iterations=0)
+
+
+class TestPermissionMode:
+    def test_default_mode_is_ask(self) -> None:
+        settings = ToolSettings()
+        assert settings.permission_mode == PermissionMode.ASK
+
+    def test_effective_auto_approve_ask(self) -> None:
+        settings = ToolSettings(permission_mode=PermissionMode.ASK)
+        effective = settings.effective_auto_approve
+        assert effective == {"file_read", "glob", "grep"}
+
+    def test_effective_auto_approve_auto_edit(self) -> None:
+        settings = ToolSettings(permission_mode=PermissionMode.AUTO_EDIT)
+        effective = settings.effective_auto_approve
+        assert "file_write" in effective
+        assert "file_edit" in effective
+        assert "git" in effective
+        assert "shell" not in effective
+
+    def test_effective_auto_approve_trust(self) -> None:
+        settings = ToolSettings(permission_mode=PermissionMode.TRUST)
+        effective = settings.effective_auto_approve
+        assert "shell" in effective
+        assert "file_write" in effective
+        assert "git" in effective
+
+    def test_effective_merges_config_overrides(self) -> None:
+        """Explicit auto_approve entries are merged with mode defaults."""
+        settings = ToolSettings(
+            permission_mode=PermissionMode.ASK,
+            auto_approve=["file_read", "glob", "grep", "custom_tool"],
+        )
+        effective = settings.effective_auto_approve
+        assert "custom_tool" in effective
+        assert "file_read" in effective
+
+    def test_auto_approve_default_matches_ask_mode(self) -> None:
+        """Default auto_approve list derives from ASK mode — no duplication drift."""
+        settings = ToolSettings()
+        assert set(settings.auto_approve) == set(PERMISSION_MODE_TOOLS[PermissionMode.ASK])
+
+    def test_permission_mode_from_string(self) -> None:
+        settings = ToolSettings(permission_mode="auto_edit")  # type: ignore[arg-type]
+        assert settings.permission_mode == PermissionMode.AUTO_EDIT
+
+    def test_each_mode_is_superset_of_previous(self) -> None:
+        ask = set(PERMISSION_MODE_TOOLS[PermissionMode.ASK])
+        auto_edit = set(PERMISSION_MODE_TOOLS[PermissionMode.AUTO_EDIT])
+        trust = set(PERMISSION_MODE_TOOLS[PermissionMode.TRUST])
+        assert ask.issubset(auto_edit)
+        assert auto_edit.issubset(trust)

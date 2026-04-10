@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mita.config.schema import ToolSettings
+from mita.config.schema import PermissionMode, ToolSettings
 from mita.tools.executor import execute_tool
 from mita.tools.registry import ToolRegistry
 from mita.tools.schema import ToolCall, ToolDefinition, ToolResult
@@ -106,3 +106,66 @@ class TestExecuteTool:
         call = ToolCall(id="1", name="git", arguments={"subcommand": "status"})
         result = await execute_tool(call, registry, ToolSettings())
         assert result.success is True
+
+    @pytest.mark.asyncio()
+    async def test_auto_edit_mode_approves_writes(self, registry: ToolRegistry) -> None:
+        call = ToolCall(id="1", name="danger_tool", arguments={})
+        settings = ToolSettings(
+            permission_mode=PermissionMode.AUTO_EDIT,
+            auto_approve=["danger_tool"],
+        )
+        result = await execute_tool(call, registry, settings)
+        assert result.success is True
+
+    @pytest.mark.asyncio()
+    async def test_trust_mode_approves_shell(self, registry: ToolRegistry) -> None:
+        call = ToolCall(id="1", name="shell", arguments={"command": "echo hello"})
+        settings = ToolSettings(permission_mode=PermissionMode.TRUST)
+        result = await execute_tool(call, registry, settings)
+        assert result.success is True
+
+    @pytest.mark.asyncio()
+    async def test_session_approved_skips_confirm(self, registry: ToolRegistry) -> None:
+        call = ToolCall(id="1", name="danger_tool", arguments={})
+        result = await execute_tool(
+            call, registry, ToolSettings(), session_approved={"danger_tool"}
+        )
+        assert result.success is True
+
+    @pytest.mark.asyncio()
+    async def test_glob_receives_config_max_results(self, registry: ToolRegistry) -> None:
+        """Executor injects _max_results from config into glob args."""
+        captured_args: dict[str, object] = {}
+
+        async def capture_handler(args: dict[str, object]) -> ToolResult:
+            captured_args.update(args)
+            return ToolResult(tool_call_id="", success=True, output="ok")
+
+        reg = ToolRegistry()
+        reg.register(
+            ToolDefinition(name="glob", description="glob", parameters=[], destructive=False),
+            capture_handler,
+        )
+        call = ToolCall(id="1", name="glob", arguments={"pattern": "*.py"})
+        settings = ToolSettings(glob_max_results=42)
+        await execute_tool(call, reg, settings)
+        assert captured_args.get("_max_results") == 42
+
+    @pytest.mark.asyncio()
+    async def test_grep_receives_config_max_matches(self, registry: ToolRegistry) -> None:
+        """Executor injects _max_matches from config into grep args."""
+        captured_args: dict[str, object] = {}
+
+        async def capture_handler(args: dict[str, object]) -> ToolResult:
+            captured_args.update(args)
+            return ToolResult(tool_call_id="", success=True, output="ok")
+
+        reg = ToolRegistry()
+        reg.register(
+            ToolDefinition(name="grep", description="grep", parameters=[], destructive=False),
+            capture_handler,
+        )
+        call = ToolCall(id="1", name="grep", arguments={"pattern": "test"})
+        settings = ToolSettings(grep_max_matches=99)
+        await execute_tool(call, reg, settings)
+        assert captured_args.get("_max_matches") == 99
