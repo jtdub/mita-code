@@ -57,6 +57,7 @@ invoke = ">=2.0.0"
 isort = ">=5.12.0"
 types-psutil = ">=5.9.0"
 types-pyyaml = "^6.0.12.20250915"
+pytest-cov = "^7.1.0"
 
 
 [tool.poetry.group.docs.dependencies]
@@ -88,3 +89,18 @@ line_length = 100
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "--cov=mita --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src/mita"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.",
+    "@overload",
+]

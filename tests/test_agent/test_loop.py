@@ -10,7 +10,6 @@ import pytest
 from mita.agent.conversation import Conversation, Message, Role
 from mita.agent.loop import (
     _accumulate_tool_call_deltas,
-    _extract_delta,
     _extract_tool_calls_from_text,
     _parse_response,
     run_agent,
@@ -18,28 +17,6 @@ from mita.agent.loop import (
 from mita.config.schema import MitaConfig
 from mita.tools.registry import ToolRegistry, create_default_registry
 from mita.tools.schema import ToolDefinition, ToolParameter, ToolResult
-
-
-class TestExtractDelta:
-    def test_object_chunk(self) -> None:
-        class Delta:
-            content = "hello"
-
-        class Choice:
-            delta = Delta()
-
-        class Chunk:
-            choices = [Choice()]
-
-        assert _extract_delta(Chunk()) == "hello"
-
-    def test_dict_chunk(self) -> None:
-        chunk = {"choices": [{"delta": {"content": "world"}}]}
-        assert _extract_delta(chunk) == "world"
-
-    def test_empty(self) -> None:
-        assert _extract_delta({}) == ""
-        assert _extract_delta({"choices": []}) == ""
 
 
 class TestParseResponse:

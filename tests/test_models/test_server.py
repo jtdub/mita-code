@@ -222,19 +222,17 @@ class TestEnsureModel:
 
     def test_model_already_installed(self) -> None:
         with patch("mita.models.server.OllamaClient") as mock_cls:
-            mock_cls.return_value.list_models.return_value = self._make_models("qwen2.5-coder:7b")
+            mock_cls.return_value.is_model_installed.return_value = True
             assert ensure_model("qwen2.5-coder:7b") is True
 
     def test_model_installed_without_tag(self) -> None:
         with patch("mita.models.server.OllamaClient") as mock_cls:
-            mock_cls.return_value.list_models.return_value = self._make_models(
-                "qwen2.5-coder:latest"
-            )
+            mock_cls.return_value.is_model_installed.return_value = True
             assert ensure_model("qwen2.5-coder") is True
 
     def test_model_not_installed_pulls(self) -> None:
         with patch("mita.models.server.OllamaClient") as mock_cls:
-            mock_cls.return_value.list_models.return_value = []
+            mock_cls.return_value.is_model_installed.return_value = False
             mock_cls.return_value.pull.return_value = iter([{"status": "success"}])
             assert ensure_model("qwen2.5-coder:7b") is True
 
@@ -242,11 +240,11 @@ class TestEnsureModel:
         import ollama as ollama_lib
 
         with patch("mita.models.server.OllamaClient") as mock_cls:
-            mock_cls.return_value.list_models.return_value = []
+            mock_cls.return_value.is_model_installed.return_value = False
             mock_cls.return_value.pull.side_effect = ollama_lib.ResponseError("not found")
             assert ensure_model("bad-model") is False
 
     def test_connection_error(self) -> None:
         with patch("mita.models.server.OllamaClient") as mock_cls:
-            mock_cls.return_value.list_models.side_effect = ConnectionError
+            mock_cls.return_value.is_model_installed.side_effect = ConnectionError
             assert ensure_model("test-model") is False

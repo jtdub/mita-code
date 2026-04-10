@@ -22,6 +22,16 @@ CaptureFixture = pytest.CaptureFixture[str]
 
 
 @pytest.fixture()
+def mock_config() -> MagicMock:
+    """Shared mock MitaConfig."""
+    cfg = MagicMock()
+    cfg.ollama.host = "http://localhost:11434"
+    cfg.ollama.timeout = 120
+    cfg.ollama.auto_manage = True
+    return cfg
+
+
+@pytest.fixture()
 def mock_client() -> MagicMock:
     """Shared mock OllamaClient."""
     client = MagicMock()
@@ -30,9 +40,9 @@ def mock_client() -> MagicMock:
 
 
 @pytest.fixture()
-def _patch_client(mock_client: MagicMock) -> MagicMock:  # type: ignore[misc]
-    """Patch _get_client to return our mock."""
-    with patch("mita.models.manager._get_client", return_value=mock_client):
+def _patch_client(mock_client: MagicMock, mock_config: MagicMock) -> MagicMock:  # type: ignore[misc]
+    """Patch _get_client to return our mock client and config."""
+    with patch("mita.models.manager._get_client", return_value=(mock_client, mock_config)):
         yield mock_client
 
 
@@ -57,11 +67,10 @@ class TestListModels:
         output = capsys.readouterr().out
         assert "No models installed" in output
 
-    @patch("mita.models.manager.load_config")
     def test_ollama_not_running(
-        self, mock_cfg: MagicMock, _patch_client: MagicMock, capsys: CaptureFixture
+        self, _patch_client: MagicMock, mock_config: MagicMock, capsys: CaptureFixture
     ) -> None:
-        mock_cfg.return_value.ollama.auto_manage = False
+        mock_config.ollama.auto_manage = False
         _patch_client.is_running.return_value = False
         list_models()
         output = capsys.readouterr().out
@@ -83,11 +92,10 @@ class TestPullModel:
         output = capsys.readouterr().out
         assert "Failed to pull" in output
 
-    @patch("mita.models.manager.load_config")
     def test_pull_ollama_not_running(
-        self, mock_cfg: MagicMock, _patch_client: MagicMock, capsys: CaptureFixture
+        self, _patch_client: MagicMock, mock_config: MagicMock, capsys: CaptureFixture
     ) -> None:
-        mock_cfg.return_value.ollama.auto_manage = False
+        mock_config.ollama.auto_manage = False
         _patch_client.is_running.return_value = False
         pull_model("test-model")
         output = capsys.readouterr().out

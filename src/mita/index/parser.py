@@ -10,6 +10,9 @@ from typing import Any
 from mita.config.schema import IndexSettings
 from mita.index.store import CodeChunk
 
+# Rough estimate: ~4 characters per token for budget calculations
+CHARS_PER_TOKEN = 4
+
 # Extension → tree-sitter language name
 EXTENSION_MAP: dict[str, str] = {
     ".py": "python",
@@ -116,15 +119,26 @@ def get_language_for_file(path: Path) -> str | None:
 
 
 def _discover_files(root: Path, exclude_patterns: list[str]) -> list[Path]:
-    """Walk the project and yield non-excluded files."""
-    files = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = str(path.relative_to(root))
-        if _matches_exclude(rel, exclude_patterns):
-            continue
-        files.append(path)
+    """Walk the project tree, skipping excluded directories early.
+
+    Uses os.walk instead of rglob so we can prune entire directory
+    subtrees (e.g. node_modules, .git) before descending into them.
+    """
+    import os
+
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        # Prune excluded directories in-place so os.walk skips them
+        dirnames[:] = sorted(
+            d
+            for d in dirnames
+            if not _matches_exclude(f"{rel_dir}/{d}" if rel_dir != "." else d, exclude_patterns)
+        )
+        for filename in sorted(filenames):
+            rel_file = f"{rel_dir}/{filename}" if rel_dir != "." else filename
+            if not _matches_exclude(rel_file, exclude_patterns):
+                files.append(Path(dirpath) / filename)
     return files
 
 
@@ -189,7 +203,7 @@ def _parse_with_treesitter(
         symbol = _extract_symbol(node, language)
 
         # Split large nodes
-        char_budget = config.chunk_size * 4  # ~4 chars per token
+        char_budget = config.chunk_size * CHARS_PER_TOKEN  # ~4 chars per token
         if len(node_content) > char_budget:
             sub_chunks = _split_large_content(
                 node_content, start_line, rel_path, language, symbol, config
@@ -226,6 +240,45 @@ def _extract_symbol(node: Any, language: str) -> str | None:
     return None
 
 
+def _compute_line_windows(
+    lines: list[str],
+    char_budget: int,
+    overlap_chars: int,
+) -> list[tuple[int, int]]:
+    """Compute overlapping (start, end) line windows for chunking.
+
+    Returns a list of (start, end) tuples where lines[start:end] is one window.
+    """
+    windows: list[tuple[int, int]] = []
+    start = 0
+    while start < len(lines):
+        end = start
+        total_chars = 0
+        while end < len(lines) and total_chars < char_budget:
+            total_chars += len(lines[end]) + 1
+            end += 1
+
+        windows.append((start, end))
+
+        if end >= len(lines):
+            break
+
+        overlap_lines = 0
+        overlap_total = 0
+        for i in range(end - 1, start, -1):
+            overlap_total += len(lines[i]) + 1
+            overlap_lines += 1
+            if overlap_total >= overlap_chars:
+                break
+
+        new_start = end - overlap_lines
+        if new_start <= start:
+            break
+        start = new_start
+
+    return windows
+
+
 def _split_large_content(
     content: str,
     base_start_line: int,
@@ -236,19 +289,11 @@ def _split_large_content(
 ) -> list[CodeChunk]:
     """Split a large chunk into overlapping sub-chunks."""
     lines = content.split("\n")
-    char_budget = config.chunk_size * 4
-    overlap_chars = config.chunk_overlap * 4
+    char_budget = config.chunk_size * CHARS_PER_TOKEN
+    overlap_chars = config.chunk_overlap * CHARS_PER_TOKEN
     chunks: list[CodeChunk] = []
 
-    start = 0
-    while start < len(lines):
-        # Accumulate lines until we hit the budget
-        end = start
-        total_chars = 0
-        while end < len(lines) and total_chars < char_budget:
-            total_chars += len(lines[end]) + 1
-            end += 1
-
+    for start, end in _compute_line_windows(lines, char_budget, overlap_chars):
         chunk_content = "\n".join(lines[start:end])
         chunks.append(
             CodeChunk(
@@ -261,24 +306,6 @@ def _split_large_content(
             )
         )
 
-        # If we consumed all lines, we're done
-        if end >= len(lines):
-            break
-
-        # Advance with overlap
-        overlap_lines = 0
-        overlap_total = 0
-        for i in range(end - 1, start, -1):
-            overlap_total += len(lines[i]) + 1
-            overlap_lines += 1
-            if overlap_total >= overlap_chars:
-                break
-
-        new_start = end - overlap_lines
-        if new_start <= start:
-            break
-        start = new_start
-
     return chunks
 
 
@@ -290,18 +317,11 @@ def _chunk_by_lines(
 ) -> list[CodeChunk]:
     """Fallback: chunk file by line windows."""
     lines = content.split("\n")
-    char_budget = config.chunk_size * 4
-    overlap_chars = config.chunk_overlap * 4
+    char_budget = config.chunk_size * CHARS_PER_TOKEN
+    overlap_chars = config.chunk_overlap * CHARS_PER_TOKEN
     chunks: list[CodeChunk] = []
 
-    start = 0
-    while start < len(lines):
-        end = start
-        total_chars = 0
-        while end < len(lines) and total_chars < char_budget:
-            total_chars += len(lines[end]) + 1
-            end += 1
-
+    for start, end in _compute_line_windows(lines, char_budget, overlap_chars):
         chunk_content = "\n".join(lines[start:end])
         if chunk_content.strip():
             chunks.append(
@@ -313,23 +333,5 @@ def _chunk_by_lines(
                     language=language,
                 )
             )
-
-        # If we consumed all lines, we're done
-        if end >= len(lines):
-            break
-
-        # Advance with overlap
-        overlap_lines = 0
-        overlap_total = 0
-        for i in range(end - 1, start, -1):
-            overlap_total += len(lines[i]) + 1
-            overlap_lines += 1
-            if overlap_total >= overlap_chars:
-                break
-
-        new_start = end - overlap_lines
-        if new_start <= start:
-            break
-        start = new_start
 
     return chunks

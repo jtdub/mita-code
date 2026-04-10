@@ -5,13 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from mita.config.schema import MitaConfig
+from mita.index import get_index_dir
 from mita.index.embeddings import EmbeddingClient
 from mita.index.store import IndexStore, SearchResult
-
-
-def _default_index_dir() -> Path:
-    """Determine the index directory for the current project."""
-    return Path.cwd() / ".mita" / "index"
 
 
 class Retriever:
@@ -19,7 +15,7 @@ class Retriever:
 
     def __init__(self, config: MitaConfig, index_dir: Path | None = None) -> None:
         self._config = config
-        self._index_dir = index_dir or _default_index_dir()
+        self._index_dir = index_dir or get_index_dir()
         self._store = IndexStore(self._index_dir)
         self._embedder = EmbeddingClient(config)
 

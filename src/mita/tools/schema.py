@@ -85,3 +85,39 @@ class ToolResult(BaseModel):
             + f"\n\n... [truncated, {len(self.output):,} chars total]"
         )
         return self.model_copy(update={"output": truncated_output, "truncated": True})
+
+    @classmethod
+    def from_subprocess(
+        cls,
+        stdout_bytes: bytes | None,
+        stderr_bytes: bytes | None,
+        returncode: int | None,
+        *,
+        empty_message: str = "(no output)",
+    ) -> ToolResult:
+        """Build a ToolResult from subprocess output.
+
+        Shared by shell and git tools to avoid duplicating the
+        stdout/stderr decoding, assembly, and exit-code formatting logic.
+        """
+        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+
+        output_parts: list[str] = []
+        if stdout:
+            output_parts.append(stdout)
+        if stderr:
+            output_parts.append(f"STDERR:\n{stderr}")
+
+        output = "\n".join(output_parts) if output_parts else empty_message
+        exit_code = returncode or 0
+
+        if exit_code != 0:
+            output = f"[exit code {exit_code}]\n{output}"
+
+        return cls(
+            tool_call_id="",
+            success=exit_code == 0,
+            output=output,
+            error=f"Command failed with exit code {exit_code}" if exit_code != 0 else None,
+        )

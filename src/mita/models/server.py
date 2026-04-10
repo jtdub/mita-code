@@ -202,18 +202,9 @@ def ensure_model(
     """Ensure a model is installed, pulling it automatically if missing."""
     client = OllamaClient(host=host, timeout=timeout)
 
-    # Check if model is already installed
     try:
-        installed = client.list_models()
-        for m in installed:
-            # Match both exact name and name without tag
-            if m.name == model_name or m.name == f"{model_name}:latest":
-                return True
-            # Also match if user specified without tag
-            if m.name.split(":")[0] == model_name.split(":")[0] and (
-                ":" not in model_name or m.name == model_name
-            ):
-                return True
+        if client.is_model_installed(model_name):
+            return True
     except (ConnectionError, OSError):
         if console:
             console.print("[red]Cannot connect to Ollama to check models.[/red]")
