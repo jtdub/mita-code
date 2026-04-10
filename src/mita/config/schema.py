@@ -2,7 +2,38 @@
 
 from __future__ import annotations
 
+import enum
+
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class PermissionMode(enum.StrEnum):
+    """Permission mode controlling which tools are auto-approved.
+
+    - ask: only read-only tools auto-approved (safest)
+    - auto_edit: file reads/writes/edits and git auto-approved, shell requires confirmation
+    - trust: all tools auto-approved (dangerous)
+    """
+
+    ASK = "ask"
+    AUTO_EDIT = "auto_edit"
+    TRUST = "trust"
+
+
+# Tools auto-approved in each permission mode
+PERMISSION_MODE_TOOLS: dict[PermissionMode, list[str]] = {
+    PermissionMode.ASK: ["file_read", "glob", "grep"],
+    PermissionMode.AUTO_EDIT: ["file_read", "glob", "grep", "file_write", "file_edit", "git"],
+    PermissionMode.TRUST: [
+        "file_read",
+        "glob",
+        "grep",
+        "file_write",
+        "file_edit",
+        "git",
+        "shell",
+    ],
+}
 
 
 class OllamaSettings(BaseModel):
@@ -79,7 +110,10 @@ class ModelSettings(BaseModel):
 class ToolSettings(BaseModel):
     """Tool execution settings."""
 
-    auto_approve: list[str] = Field(default_factory=lambda: ["file_read", "glob", "grep"])
+    permission_mode: PermissionMode = PermissionMode.ASK
+    auto_approve: list[str] = Field(
+        default_factory=lambda: list(PERMISSION_MODE_TOOLS[PermissionMode.ASK])
+    )
     confirm_destructive: bool = True
     shell_timeout: int = 120
     glob_max_results: int = 500
@@ -87,6 +121,15 @@ class ToolSettings(BaseModel):
     banned_commands: list[str] = Field(
         default_factory=lambda: ["rm -rf /", "mkfs", "dd if=/dev/zero"]
     )
+
+    @property
+    def effective_auto_approve(self) -> set[str]:
+        """Return the effective set of auto-approved tools.
+
+        Merges the permission mode's default tools with any explicit auto_approve overrides.
+        """
+        mode_tools = set(PERMISSION_MODE_TOOLS[self.permission_mode])
+        return mode_tools | set(self.auto_approve)
 
     @field_validator("shell_timeout")
     @classmethod

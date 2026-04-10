@@ -27,13 +27,14 @@ TOOL_DEF = ToolDefinition(
     destructive=False,
 )
 
-MAX_RESULTS = 500
+DEFAULT_MAX_RESULTS = 500
 
 
 async def execute(args: dict[str, Any]) -> ToolResult:
     """Search for files matching a glob pattern."""
     pattern = str(args.get("pattern", ""))
     base_path = str(args.get("path", ".") or ".")
+    max_results = int(args.get("_max_results", DEFAULT_MAX_RESULTS))
 
     if not pattern:
         return ToolResult(
@@ -61,12 +62,12 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     if not files:
         return ToolResult(tool_call_id="", success=True, output="No files matched.")
 
-    truncated = len(files) > MAX_RESULTS
-    output_files = files[:MAX_RESULTS]
+    truncated = len(files) > max_results
+    output_files = files[:max_results]
     output = "\n".join(output_files)
 
     if truncated:
-        output += f"\n\n... [{len(files)} total matches, showing first {MAX_RESULTS}]"
+        output += f"\n\n... [{len(files)} total matches, showing first {max_results}]"
     else:
         output += f"\n\n[{len(files)} file(s) matched]"
 

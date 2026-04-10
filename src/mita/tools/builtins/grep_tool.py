@@ -34,7 +34,7 @@ TOOL_DEF = ToolDefinition(
     destructive=False,
 )
 
-MAX_MATCHES = 200
+DEFAULT_MAX_MATCHES = 200
 
 
 async def execute(args: dict[str, Any]) -> ToolResult:
@@ -42,6 +42,7 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     pattern_str = str(args.get("pattern", ""))
     path_str = str(args.get("path", ".") or ".")
     include = args.get("include")
+    max_matches = int(args.get("_max_matches", DEFAULT_MAX_MATCHES))
 
     if not pattern_str:
         return ToolResult(
@@ -87,17 +88,17 @@ async def execute(args: dict[str, Any]) -> ToolResult:
             if regex.search(line):
                 matches.append(f"{file_path}:{line_num}: {line.rstrip()}")
                 match_count += 1
-                if match_count >= MAX_MATCHES:
+                if match_count >= max_matches:
                     break
-        if match_count >= MAX_MATCHES:
+        if match_count >= max_matches:
             break
 
     if not matches:
         return ToolResult(tool_call_id="", success=True, output="No matches found.")
 
     output = "\n".join(matches)
-    if match_count >= MAX_MATCHES:
-        output += f"\n\n... [showing first {MAX_MATCHES} matches]"
+    if match_count >= max_matches:
+        output += f"\n\n... [showing first {max_matches} matches]"
     else:
         output += f"\n\n[{match_count} match(es)]"
 

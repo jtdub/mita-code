@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from mita.config.schema import ToolSettings
 from mita.tools.registry import ToolRegistry
@@ -11,12 +13,15 @@ from mita.tools.schema import ToolCall, ToolResult
 
 _logger = logging.getLogger(__name__)
 
+ConfirmFn = Callable[[str], Coroutine[Any, Any, bool]]
+
 
 async def execute_tool(
     tool_call: ToolCall,
     registry: ToolRegistry,
     settings: ToolSettings,
-    confirm_fn: object | None = None,
+    confirm_fn: ConfirmFn | None = None,
+    session_approved: set[str] | None = None,
 ) -> ToolResult:
     """Execute a tool call with safety checks and optional confirmation.
 
@@ -26,6 +31,7 @@ async def execute_tool(
         settings: Tool settings (auto_approve, banned_commands, etc.).
         confirm_fn: Optional async callable(str) -> bool for user confirmation.
                      If None, destructive tools are denied automatically.
+        session_approved: Set of tool names approved for the current session.
     """
     tool_def = registry.get_definition(tool_call.name)
     if tool_def is None:
@@ -54,7 +60,7 @@ async def execute_tool(
             )
 
     # Confirmation flow
-    if needs_confirmation(tool_call, tool_def, settings):
+    if needs_confirmation(tool_call, tool_def, settings, session_approved=session_approved):
         if confirm_fn is None:
             return ToolResult(
                 tool_call_id=tool_call.id,
@@ -70,6 +76,11 @@ async def execute_tool(
                 success=False,
                 error="User denied this action.",
             )
+
+    if tool_call.name == "glob":
+        tool_call.arguments.setdefault("_max_results", settings.glob_max_results)
+    elif tool_call.name == "grep":
+        tool_call.arguments.setdefault("_max_matches", settings.grep_max_matches)
 
     return await registry.execute(tool_call)
 

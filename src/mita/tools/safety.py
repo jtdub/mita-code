@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path
 
 from mita.config.schema import ToolSettings
+from mita.tools.builtins.git import is_safe_git_command
 from mita.tools.schema import ToolCall, ToolDefinition
 
 # Paths that should never be read or written by tools
@@ -113,19 +114,24 @@ def needs_confirmation(
     tool_call: ToolCall,
     tool_def: ToolDefinition,
     settings: ToolSettings,
+    session_approved: set[str] | None = None,
 ) -> bool:
     """Determine if a tool call needs user confirmation before execution.
 
     Returns True if:
     - The tool is marked destructive AND confirm_destructive is on
-      AND the tool is not in auto_approve.
+      AND the tool is not in the effective auto-approve set or session-approved set.
     - Or the tool is 'shell' and the command looks destructive.
-    - Or the tool is 'git' and the subcommand is destructive.
+    - Or the tool is 'git' and the subcommand is destructive (not read-only).
     """
     if not settings.confirm_destructive:
         return False
 
-    if tool_call.name in settings.auto_approve:
+    effective = settings.effective_auto_approve
+    if session_approved:
+        effective = effective | session_approved
+
+    if tool_call.name in effective:
         return False
 
     if tool_def.destructive:
@@ -138,6 +144,8 @@ def needs_confirmation(
 
     if tool_call.name == "git":
         subcommand = tool_call.arguments.get("subcommand", "")
+        if is_safe_git_command(subcommand):
+            return False
         if is_git_command_destructive(subcommand):
             return True
 
