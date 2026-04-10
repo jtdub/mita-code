@@ -89,6 +89,17 @@ class OllamaClient:
         """
         self._client.delete(model_name)
 
+    def is_model_installed(self, model_name: str) -> bool:
+        """Check if a model is installed, matching by exact name or base name."""
+        installed = self.list_models()
+        base_name = model_name.split(":")[0]
+        return any(
+            m.name == model_name
+            or m.name == f"{model_name}:latest"
+            or (m.name.split(":")[0] == base_name and ":" not in model_name)
+            for m in installed
+        )
+
     def show(self, model_name: str) -> dict[str, Any]:
         """Show details about a model."""
         response = self._client.show(model_name)

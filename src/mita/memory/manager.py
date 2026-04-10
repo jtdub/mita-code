@@ -17,6 +17,14 @@ from mita.memory.loader import load_memory_raw
 console = Console()
 
 
+def _ensure_memory_file(path: Path, title: str) -> None:
+    """Create a memory file with a header if it doesn't exist."""
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# {title}\n\n", encoding="utf-8")
+
+
 def show_memory() -> None:
     """Display all discovered memory content with source annotations."""
     entries = load_memory_raw()
@@ -56,17 +64,14 @@ def edit_memory(scope: str | None = None) -> None:
 
     if scope == "global":
         path = get_global_memory_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            path.write_text("# Global Mita Memory\n\n", encoding="utf-8")
+        _ensure_memory_file(path, "Global Mita Memory")
     elif scope == "project":
         project_root = _find_project_root(Path.cwd())
         if project_root is None:
             console.print("[red]Not in a project (no .git or .mita directory found).[/red]")
             return
         path = project_root / MEMORY_FILENAME
-        if not path.exists():
-            path.write_text(f"# {project_root.name} — Mita Memory\n\n", encoding="utf-8")
+        _ensure_memory_file(path, f"{project_root.name} — Mita Memory")
     else:
         # Find nearest existing MITA.md, or create at project root
         files = discover_memory_files()
@@ -83,8 +88,7 @@ def edit_memory(scope: str | None = None) -> None:
                 )
                 return
             path = project_root / MEMORY_FILENAME
-            if not path.exists():
-                path.write_text(f"# {project_root.name} — Mita Memory\n\n", encoding="utf-8")
+            _ensure_memory_file(path, f"{project_root.name} — Mita Memory")
 
     console.print(f"[dim]Opening {path} in {editor}...[/dim]")
     subprocess.run([editor, str(path)])
@@ -99,17 +103,14 @@ def add_memory(text: str, scope: str | None = None) -> None:
     """
     if scope == "global":
         path = get_global_memory_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            path.write_text("# Global Mita Memory\n\n", encoding="utf-8")
+        _ensure_memory_file(path, "Global Mita Memory")
     else:
         project_root = _find_project_root(Path.cwd())
         if project_root is None:
             console.print("[red]Not in a project (no .git or .mita directory found).[/red]")
             return
         path = project_root / MEMORY_FILENAME
-        if not path.exists():
-            path.write_text(f"# {project_root.name} — Mita Memory\n\n", encoding="utf-8")
+        _ensure_memory_file(path, f"{project_root.name} — Mita Memory")
 
     with open(path, "a", encoding="utf-8") as f:
         f.write(f"- {text}\n")

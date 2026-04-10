@@ -34,7 +34,7 @@ async def stream_to_terminal(
 
     try:
         async for chunk in client.stream_chat(messages, tools=tools):
-            delta = _extract_delta_content(chunk)
+            delta = extract_delta_content(chunk)
             if delta:
                 full_text += delta
                 if on_token:
@@ -52,7 +52,7 @@ async def stream_to_terminal(
     return full_text
 
 
-def _extract_delta_content(chunk: Any) -> str:
+def extract_delta_content(chunk: Any) -> str:
     """Extract text content from a streaming chunk."""
     try:
         choices = chunk.choices if hasattr(chunk, "choices") else chunk.get("choices", [])

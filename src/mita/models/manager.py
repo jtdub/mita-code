@@ -8,6 +8,7 @@ from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, Trans
 from rich.table import Table
 
 from mita.config.loader import load_config
+from mita.config.schema import MitaConfig
 from mita.models.hardware import detect_hardware
 from mita.models.ollama_client import OllamaClient
 from mita.models.recommender import recommend_models
@@ -16,19 +17,18 @@ from mita.models.registry import find_model
 console = Console()
 
 
-def _get_client() -> OllamaClient:
-    """Get an OllamaClient from the current config."""
+def _get_client() -> tuple[OllamaClient, MitaConfig]:
+    """Get an OllamaClient and config from the current config."""
     cfg = load_config()
-    return OllamaClient(host=cfg.ollama.host, timeout=cfg.ollama.timeout)
+    return OllamaClient(host=cfg.ollama.host, timeout=cfg.ollama.timeout), cfg
 
 
-def _check_ollama(client: OllamaClient) -> bool:
+def _check_ollama(client: OllamaClient, cfg: MitaConfig) -> bool:
     """Check if Ollama is running, auto-start if configured."""
     if client.is_running():
         return True
 
     # Try auto-start if configured
-    cfg = load_config()
     if cfg.ollama.auto_manage:
         from mita.models.server import ensure_server
 
@@ -44,8 +44,8 @@ def _check_ollama(client: OllamaClient) -> bool:
 
 def list_models() -> None:
     """List all installed Ollama models."""
-    client = _get_client()
-    if not _check_ollama(client):
+    client, cfg = _get_client()
+    if not _check_ollama(client, cfg):
         return
 
     models = client.list_models()
@@ -79,8 +79,8 @@ def pull_model(name: str) -> None:
     """Pull a model from the Ollama registry."""
     import ollama as ollama_lib
 
-    client = _get_client()
-    if not _check_ollama(client):
+    client, cfg = _get_client()
+    if not _check_ollama(client, cfg):
         return
 
     console.print(f"Pulling [bold]{name}[/bold]...")
@@ -114,8 +114,8 @@ def pull_model(name: str) -> None:
 
 def remove_model(name: str) -> None:
     """Remove an installed model."""
-    client = _get_client()
-    if not _check_ollama(client):
+    client, cfg = _get_client()
+    if not _check_ollama(client, cfg):
         return
 
     import ollama as ollama_lib
@@ -150,8 +150,8 @@ def show_model_info(name: str) -> None:
     # Also show Ollama details if installed
     import ollama as ollama_lib
 
-    client = _get_client()
-    if not _check_ollama(client):
+    client, cfg = _get_client()
+    if not _check_ollama(client, cfg):
         return
 
     try:

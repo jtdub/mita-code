@@ -68,26 +68,9 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     except OSError as e:
         return ToolResult(tool_call_id="", success=False, error=f"Failed to run command: {e}")
 
-    stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-    stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-
-    output_parts: list[str] = []
-    if stdout:
-        output_parts.append(stdout)
-    if stderr:
-        output_parts.append(f"STDERR:\n{stderr}")
-
-    output = (
-        "\n".join(output_parts) if output_parts else "Command completed successfully (no output)."
-    )
-    exit_code = proc.returncode or 0
-
-    if exit_code != 0:
-        output = f"[exit code {exit_code}]\n{output}"
-
-    return ToolResult(
-        tool_call_id="",
-        success=exit_code == 0,
-        output=output,
-        error=f"Command exited with code {exit_code}" if exit_code != 0 else None,
+    return ToolResult.from_subprocess(
+        stdout_bytes,
+        stderr_bytes,
+        proc.returncode,
+        empty_message="Command completed successfully (no output).",
     )

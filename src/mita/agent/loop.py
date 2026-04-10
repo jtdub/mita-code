@@ -17,6 +17,7 @@ from mita.agent.context import assemble_context
 from mita.agent.conversation import Conversation, Message, Role
 from mita.config.schema import MitaConfig
 from mita.llm.client import LLMClient
+from mita.llm.streaming import extract_delta_content
 from mita.tools.executor import execute_tool
 from mita.tools.registry import ToolRegistry, create_default_registry
 from mita.tools.schema import ToolCall
@@ -72,6 +73,8 @@ async def run_agent(
     conversation.add(Message(role=Role.USER, content=user_prompt))
 
     # Inject RAG context if index is available (replace previous RAG message)
+    # Create the retriever once per call rather than per-iteration
+    retriever = None
     if config.index.enabled:
         try:
             from mita.index.retriever import Retriever
@@ -111,6 +114,8 @@ async def run_agent(
     repeat_count = 0
     max_iterations = config.max_iterations
     assistant_text = ""
+    # Compute tool schemas once — they don't change between iterations
+    tool_schemas = registry.get_openai_schemas()
     for _iteration in range(max_iterations):
         try:
             # Truncate to fit context window
@@ -118,7 +123,6 @@ async def run_agent(
 
             # Call LLM with tool schemas so the model can produce structured tool calls
             messages = conversation.get_messages_for_api()
-            tool_schemas = registry.get_openai_schemas()
 
             if config.ui.stream:
                 assistant_text, tool_calls_raw, stats = await _stream_response(
@@ -270,7 +274,7 @@ async def _stream_response(
                 stats.ttft = time.monotonic() - start_time
                 first_token = False
 
-            delta = _extract_delta(chunk)
+            delta = extract_delta_content(chunk)
             if delta:
                 full_text += delta
                 display_streaming_token(console, delta)
@@ -315,22 +319,6 @@ def _extract_usage(chunk: Any) -> dict[str, int] | None:
     except (AttributeError, KeyError):
         pass
     return None
-
-
-def _extract_delta(chunk: Any) -> str:
-    """Extract text content from a streaming chunk."""
-    try:
-        choices = chunk.choices if hasattr(chunk, "choices") else chunk.get("choices", [])
-        if not choices:
-            return ""
-        delta = choices[0].delta if hasattr(choices[0], "delta") else choices[0].get("delta", {})
-        if hasattr(delta, "content"):
-            return delta.content or ""
-        if isinstance(delta, dict):
-            return delta.get("content", "") or ""
-    except (IndexError, AttributeError, KeyError):
-        pass
-    return ""
 
 
 def _accumulate_tool_call_deltas(
@@ -544,6 +532,13 @@ async def _process_tool_calls(
     console: Console,
 ) -> None:
     """Process tool calls from an LLM response."""
+    # Import hooks runner once if hooks are configured
+    _run_hooks = None
+    if config.hooks:
+        from mita.hooks.runner import run_hooks
+
+        _run_hooks = run_hooks
+
     for tc_raw in tool_calls_raw:
         func = tc_raw.get("function", {})
         tc_id = tc_raw.get("id", str(uuid.uuid4()))
@@ -565,10 +560,8 @@ async def _process_tool_calls(
         display_tool_call(console, tool_call)
 
         # Fire pre_tool_call hooks
-        if config.hooks:
-            from mita.hooks.runner import run_hooks
-
-            await run_hooks(
+        if _run_hooks is not None:
+            await _run_hooks(
                 "pre_tool_call",
                 config.hooks,
                 context={"tool": name, "args": arguments},
@@ -587,10 +580,8 @@ async def _process_tool_calls(
         display_tool_result(console, result)
 
         # Fire post_tool_call hooks
-        if config.hooks:
-            from mita.hooks.runner import run_hooks
-
-            await run_hooks(
+        if _run_hooks is not None:
+            await _run_hooks(
                 "post_tool_call",
                 config.hooks,
                 context={"tool": name, "result": str(result.output or result.error)},
@@ -599,12 +590,10 @@ async def _process_tool_calls(
             )
 
         # Fire on_file_write hooks for file_write/file_edit tools
-        if config.hooks and result.success and name in ("file_write", "file_edit"):
-            from mita.hooks.runner import run_hooks
-
+        if _run_hooks is not None and result.success and name in ("file_write", "file_edit"):
             file_path = arguments.get("path", "")
             if file_path:
-                await run_hooks(
+                await _run_hooks(
                     "on_file_write",
                     config.hooks,
                     context={"file_path": file_path},

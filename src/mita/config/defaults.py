@@ -39,3 +39,24 @@ def _find_project_root(start: Path) -> Path | None:
         if parent == current:
             return None
         current = parent
+
+
+def ensure_project_config_path() -> Path | None:
+    """Return the project config file path, creating it if a project root exists.
+
+    Returns the path to the project settings.toml (creating .mita/ and the file
+    if they don't exist), or None if no project root was found.
+    """
+    project_path = get_project_config_path()
+    if project_path is not None:
+        return project_path
+
+    root = _find_project_root(Path.cwd())
+    if root is None:
+        return None
+
+    config_dir = root / PROJECT_CONFIG_DIR
+    config_dir.mkdir(exist_ok=True)
+    project_path = config_dir / PROJECT_CONFIG_FILE
+    project_path.touch()
+    return project_path

@@ -70,19 +70,13 @@ def is_command_banned(command: str, banned_commands: list[str]) -> bool:
 
 def is_command_destructive(command: str) -> bool:
     """Check if a shell command looks destructive."""
-    for pattern in DESTRUCTIVE_PATTERNS:
-        if pattern.search(command):
-            return True
-    return False
+    return any(pattern.search(command) for pattern in DESTRUCTIVE_PATTERNS)
 
 
 def is_git_command_destructive(subcommand: str) -> bool:
     """Check if a git subcommand is destructive."""
     stripped = subcommand.strip()
-    for pattern in DESTRUCTIVE_GIT_PATTERNS:
-        if pattern.search(stripped):
-            return True
-    return False
+    return any(pattern.search(stripped) for pattern in DESTRUCTIVE_GIT_PATTERNS)
 
 
 def needs_confirmation(

@@ -15,6 +15,11 @@ from rich.syntax import Syntax
 
 import mita
 from mita.config.loader import load_config
+from mita.config.toml_writer import config_to_toml as _config_to_toml
+from mita.config.toml_writer import (
+    escape_toml_string,
+    write_toml,
+)
 from mita.memory.manager import add_memory, edit_memory, show_memory, show_memory_paths
 from mita.models.manager import (
     list_models,
@@ -160,12 +165,8 @@ def memory_add(
     ] = False,
 ) -> None:
     """Append a line to a MITA.md file."""
-    if is_global:
-        add_memory(text, "global")
-    elif project:
-        add_memory(text, "project")
-    else:
-        add_memory(text, "project")
+    scope = "global" if is_global else "project"
+    add_memory(text, scope)
 
 
 # ── Models commands ───────────────────────────────────────────────
@@ -430,30 +431,16 @@ def plugins_add(
         console.print("[red]Provide --command or --url.[/red]")
         raise typer.Exit(1)
 
-    from pathlib import Path
+    from mita.config.defaults import ensure_project_config_path
 
-    from mita.config.defaults import (
-        PROJECT_CONFIG_DIR,
-        PROJECT_CONFIG_FILE,
-        _find_project_root,
-        get_project_config_path,
-    )
-
-    project_path = get_project_config_path()
+    project_path = ensure_project_config_path()
     if not project_path:
-        # Create .mita/settings.toml if we're in a project root (has .git)
-        root = _find_project_root(Path.cwd())
-        if root is None:
-            console.print("[red]Not in a project directory (no .git or .mita/).[/red]")
-            raise typer.Exit(1)
-        config_dir = root / PROJECT_CONFIG_DIR
-        config_dir.mkdir(exist_ok=True)
-        project_path = config_dir / PROJECT_CONFIG_FILE
-        project_path.touch()
+        console.print("[red]Not in a project directory (no .git or .mita/).[/red]")
+        raise typer.Exit(1)
 
     transport = "stdio" if command else "sse"
     # Build TOML block with proper escaping
-    esc = _escape_toml_string
+    esc = escape_toml_string
     lines = [f'\n[[plugins]]\nname = "{esc(name)}"\ntransport = "{esc(transport)}"']
     if command:
         # Split command into executable + args (respects quoted arguments)
@@ -497,7 +484,7 @@ def plugins_remove(
         return
 
     data["plugins"] = new_plugins
-    _write_toml(project_path, data)
+    write_toml(project_path, data)
     console.print(f"[green]Plugin '{name}' removed.[/green]")
 
 
@@ -824,17 +811,8 @@ def doctor_command() -> None:
     # 5. Embedding model installed
     _check_model_installed(doc_console, cfg.model.embedding, "Embedding model", cfg)
 
-    # 6. Config loads without error
-    try:
-        load_config()
-        doc_console.print("  [green]\u2713[/green] Config loaded successfully")
-    except Exception as exc:
-        doc_console.print("  [red]\u2717[/red] Config load error")
-        display_error_with_suggestion(
-            doc_console,
-            f"Config error: {exc}",
-            "Check ~/.config/mita/config.toml and .mita/settings.toml",
-        )
+    # 6. Config loads without error (already verified by the load_config() above)
+    doc_console.print("  [green]\u2713[/green] Config loaded successfully")
 
     # 7. Memory files discoverable
     from mita.memory.discovery import discover_memory_files
@@ -880,14 +858,7 @@ def _check_model_installed(doc_console: Console, model_name: str, label: str, cf
 
     try:
         client = OllamaClient(host=cfg.ollama.host, timeout=cfg.ollama.timeout)
-        installed = client.list_models()
-        found = any(
-            m.name == model_name
-            or m.name == f"{model_name}:latest"
-            or m.name.split(":")[0] == model_name.split(":")[0]
-            for m in installed
-        )
-        if found:
+        if client.is_model_installed(model_name):
             doc_console.print(f"  [green]\u2713[/green] {label} ({model_name}) installed")
         else:
             doc_console.print(f"  [red]\u2717[/red] {label} ({model_name}) not installed")
@@ -901,72 +872,3 @@ def _check_model_installed(doc_console: Console, model_name: str, label: str, cf
 
 
 # ── Helpers ───────────────────────────────────────────────────────
-
-
-def _config_to_toml(cfg: object) -> str:
-    """Convert a MitaConfig to a TOML-formatted string for display."""
-    from mita.config.schema import MitaConfig
-
-    assert isinstance(cfg, MitaConfig)
-    data = cfg.model_dump()
-    lines: list[str] = []
-    _dict_to_toml(data, lines, prefix="")
-    return "\n".join(lines)
-
-
-def _dict_to_toml(data: dict, lines: list[str], prefix: str) -> None:  # type: ignore[type-arg]
-    """Recursively format a dict as TOML."""
-    scalars = {k: v for k, v in data.items() if not isinstance(v, (dict, list))}
-    dicts = {k: v for k, v in data.items() if isinstance(v, dict)}
-    lists = {k: v for k, v in data.items() if isinstance(v, list)}
-
-    for k, v in scalars.items():
-        lines.append(f"{k} = {_toml_value(v)}")
-
-    for k, v in lists.items():
-        if v and isinstance(v[0], dict):
-            # Array of tables
-            for item in v:
-                section = f"{prefix}{k}" if prefix else k
-                lines.append(f"\n[[{section}]]")
-                _dict_to_toml(item, lines, prefix=f"{section}.")
-        else:
-            lines.append(f"{k} = {_toml_value(v)}")
-
-    for k, v in dicts.items():
-        section = f"{prefix}{k}" if prefix else k
-        lines.append(f"\n[{section}]")
-        _dict_to_toml(v, lines, prefix=f"{section}.")
-
-
-def _escape_toml_string(s: str) -> str:
-    """Escape a string for safe inclusion in a TOML quoted value."""
-    s = s.replace("\\", "\\\\")
-    s = s.replace('"', '\\"')
-    s = s.replace("\n", "\\n")
-    s = s.replace("\r", "\\r")
-    s = s.replace("\t", "\\t")
-    return s
-
-
-def _toml_value(v: object) -> str:
-    """Format a Python value as a TOML value string."""
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, str):
-        return f'"{_escape_toml_string(v)}"'
-    if isinstance(v, (int, float)):
-        return str(v)
-    if isinstance(v, list):
-        items = ", ".join(_toml_value(i) for i in v)
-        return f"[{items}]"
-    return repr(v)
-
-
-def _write_toml(path: object, data: dict) -> None:  # type: ignore[type-arg]
-    """Write a dict back to a TOML file."""
-    from pathlib import Path
-
-    lines: list[str] = []
-    _dict_to_toml(data, lines, prefix="")
-    Path(str(path)).write_text("\n".join(lines) + "\n")
