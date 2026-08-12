@@ -22,7 +22,8 @@ Think "Claude Code but 100% local."
 - **Plugins**: MCP protocol (stdio + SSE transport)
 - **Vector store**: LanceDB (local, embedded)
 - **Code parsing**: Tree-sitter
-- **UI**: Rich + prompt_toolkit
+- **UI**: Rich + prompt_toolkit (REPL); Textual (`mita chat --tui`). The agent loop
+  renders through a `UISink` protocol (`ui/sink.py`), so both frontends share it.
 
 ## Key Design Decisions
 

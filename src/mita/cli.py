@@ -713,6 +713,10 @@ def chat_command(
             help="Permission mode: ask (default), auto_edit, or trust.",
         ),
     ] = None,
+    tui: Annotated[
+        bool,
+        typer.Option("--tui", help="Launch the full-screen Textual TUI (built-in tools only)."),
+    ] = False,
 ) -> None:
     """Open an interactive chat session with the agent."""
     import asyncio
@@ -741,6 +745,15 @@ def chat_command(
         raise typer.Exit(1)
 
     _warn_if_index_stale(cfg, chat_console)
+
+    if tui:
+        # Textual TUI path. MCP plugins are not auto-started here (their sessions are
+        # bound to the loop that creates them); use `mita chat` for MCP-backed tools.
+        from mita.ui.tui.app import run_tui
+
+        tui_registry = ToolRegistry() if no_tools else create_default_registry()
+        run_tui(cfg, tui_registry, session_approved=set())
+        return
 
     from mita.plugins.manager import PluginManager
 
