@@ -111,10 +111,22 @@ class IndexStore:
                 db.drop_table(self.TABLE_NAME)
             except (ValueError, FileNotFoundError):
                 pass  # Table doesn't exist — that's fine
-            db.create_table(self.TABLE_NAME, data=records)
+            table = db.create_table(self.TABLE_NAME, data=records)
+            self._ensure_fts(table)
             self._write_meta(embed_model, built_at)
 
         await asyncio.to_thread(_sync)
+
+    def _ensure_fts(self, table: Any) -> None:
+        """(Re)build the full-text index on `content` for hybrid search.
+
+        use_tantivy=False selects LanceDB's native FTS (no `tantivy` dependency). FTS is
+        optional — hybrid search falls back to vector-only if this fails (finding C6/B2).
+        """
+        try:
+            table.create_fts_index("content", use_tantivy=False, replace=True)
+        except Exception:  # noqa: BLE001 - FTS is a best-effort enhancement
+            logging.getLogger(__name__).debug("FTS index build failed", exc_info=True)
 
     async def load_content_hashes(self) -> dict[str, str]:
         """Return {chunk_id: content_hash} for the current index (empty if none)."""
@@ -162,9 +174,51 @@ class IndexStore:
                 quoted = ", ".join(f"'{cid}'" for cid in batch)
                 table.delete(f"chunk_id IN ({quoted})")
 
+            self._ensure_fts(table)
             self._write_meta(embed_model, built_at)
 
         await asyncio.to_thread(_sync)
+
+    async def hybrid_search(
+        self,
+        query_vector: list[float],
+        query_text: str,
+        top_k: int = 10,
+        floor: float = 0.0,
+    ) -> list[SearchResult]:
+        """Hybrid (vector + BM25) search with RRF fusion, falling back to vector-only."""
+
+        def _sync() -> list[SearchResult]:
+            db = self._connect()
+            if self.TABLE_NAME not in db.table_names():
+                return []
+            table = db.open_table(self.TABLE_NAME)
+            score_col: str | None
+            try:
+                results = (
+                    table.search(query_type="hybrid")
+                    .vector(query_vector)
+                    .text(query_text)
+                    .limit(top_k)
+                    .to_pandas()
+                )
+                score_col = "_relevance_score"
+            except Exception:  # noqa: BLE001 - no FTS index / hybrid unsupported
+                results = table.search(query_vector).limit(top_k).to_pandas()
+                score_col = None
+
+            out: list[SearchResult] = []
+            for _, row in results.iterrows():
+                if score_col is not None and score_col in row:
+                    score = float(row[score_col])
+                else:
+                    score = 1.0 / (1.0 + float(row.get("_distance", 0.0)))
+                if score < floor:
+                    continue
+                out.append(SearchResult(chunk=_row_to_chunk(row), score=score))
+            return out
+
+        return await asyncio.to_thread(_sync)
 
     async def search(self, query_embedding: list[float], top_k: int = 10) -> list[SearchResult]:
         """Vector similarity search."""
@@ -180,15 +234,7 @@ class IndexStore:
             for _, row in results.iterrows():
                 distance = row.get("_distance", 0.0)
                 score = 1.0 / (1.0 + distance)
-                chunk = CodeChunk(
-                    file_path=row["file_path"],
-                    start_line=int(row["start_line"]),
-                    end_line=int(row["end_line"]),
-                    content=row["content"],
-                    language=row["language"],
-                    symbol=row.get("symbol"),
-                )
-                search_results.append(SearchResult(chunk=chunk, score=score))
+                search_results.append(SearchResult(chunk=_row_to_chunk(row), score=score))
             return search_results
 
         return await asyncio.to_thread(_sync)
@@ -243,6 +289,30 @@ class IndexStore:
 
 def _batched(items: list[str], size: int) -> list[list[str]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _row_to_chunk(row: Any) -> CodeChunk:
+    """Build a CodeChunk from a LanceDB result row (tolerant of missing columns)."""
+
+    def get(key: str, default: Any = "") -> Any:
+        try:
+            value = row[key]
+        except (KeyError, IndexError):
+            return default
+        return default if value is None else value
+
+    return CodeChunk(
+        file_path=get("file_path"),
+        start_line=int(get("start_line", 0) or 0),
+        end_line=int(get("end_line", 0) or 0),
+        content=get("content"),
+        language=get("language"),
+        symbol=get("symbol") or None,
+        symbol_path=get("symbol_path"),
+        chunk_type=get("chunk_type"),
+        content_hash=get("content_hash"),
+        chunk_id=get("chunk_id"),
+    )
 
 
 def _chunks_to_records(chunks: list[CodeChunk]) -> list[dict[str, Any]]:

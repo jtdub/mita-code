@@ -65,7 +65,7 @@ class TestRetriever:
         with (
             patch.object(retriever._store, "exists", return_value=True),
             patch.object(
-                retriever._store, "search", new_callable=AsyncMock, return_value=mock_results
+                retriever._store, "hybrid_search", new_callable=AsyncMock, return_value=mock_results
             ),
             patch.object(
                 retriever._embedder,
@@ -87,7 +87,7 @@ class TestRetriever:
         with (
             patch.object(retriever._store, "exists", return_value=True),
             patch.object(
-                retriever._store, "search", new_callable=AsyncMock, return_value=mock_results
+                retriever._store, "hybrid_search", new_callable=AsyncMock, return_value=mock_results
             ),
             patch.object(
                 retriever._embedder,
@@ -107,7 +107,9 @@ class TestRetriever:
 
         with (
             patch.object(retriever._store, "exists", return_value=True),
-            patch.object(retriever._store, "search", new_callable=AsyncMock, return_value=[]),
+            patch.object(
+                retriever._store, "hybrid_search", new_callable=AsyncMock, return_value=[]
+            ),
             patch.object(
                 retriever._embedder,
                 "embed_single",

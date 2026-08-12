@@ -189,3 +189,51 @@ class TestIncremental:
         await store.create_or_replace([self._chunk("id1", "h1", "a")], "nomic-embed-text", 1.0)
         assert store.needs_full_rebuild("nomic-embed-text") is False
         assert store.needs_full_rebuild("bge-small") is True
+
+
+class TestHybridSearch:
+    """Audit finding C6: hybrid FTS + vector search with a relevance floor."""
+
+    @pytest.mark.asyncio()
+    async def test_hybrid_search_returns_results(self, tmp_path: Path) -> None:
+        from mita.index.store import CodeChunk, IndexStore
+
+        store = IndexStore(tmp_path)
+        chunks = [
+            CodeChunk(
+                file_path="a.py", start_line=1, end_line=1,
+                content="def calculate_total(items): return sum(items)",
+                language="python", symbol="calculate_total",
+                chunk_id="id1", content_hash="h1", embedding=[0.1, 0.2, 0.3],
+            ),
+            CodeChunk(
+                file_path="b.py", start_line=1, end_line=1,
+                content="def render_html(template): return template",
+                language="python", symbol="render_html",
+                chunk_id="id2", content_hash="h2", embedding=[0.9, 0.8, 0.7],
+            ),
+        ]
+        await store.create_or_replace(chunks, "nomic", 1.0)
+
+        results = await store.hybrid_search([0.1, 0.2, 0.3], "calculate total", top_k=5)
+        assert results
+        assert any(r.chunk.symbol == "calculate_total" for r in results)
+
+    @pytest.mark.asyncio()
+    async def test_relevance_floor_filters(self, tmp_path: Path) -> None:
+        from mita.index.store import CodeChunk, IndexStore
+
+        store = IndexStore(tmp_path)
+        await store.create_or_replace(
+            [
+                CodeChunk(
+                    file_path="a.py", start_line=1, end_line=1, content="x = 1",
+                    language="python", chunk_id="id1", content_hash="h1",
+                    embedding=[0.1, 0.2, 0.3],
+                )
+            ],
+            "nomic", 1.0,
+        )
+        # An impossibly high floor drops everything.
+        results = await store.hybrid_search([0.1, 0.2, 0.3], "x", top_k=5, floor=999.0)
+        assert results == []
