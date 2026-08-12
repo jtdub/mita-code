@@ -6,14 +6,33 @@ import asyncio
 import logging
 import os
 from contextlib import AsyncExitStack
+from collections.abc import Callable
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+_mcp_default_env: Callable[[], dict[str, str]] | None
+try:
+    # Minimal, safe environment allowlist (PATH/HOME/etc.) provided by the SDK.
+    from mcp.client.stdio import get_default_environment as _mcp_default_env
+except ImportError:  # pragma: no cover - depends on mcp version
+    _mcp_default_env = None
+
 from mita.config.schema import PluginDefinition
 
 _logger = logging.getLogger(__name__)
+
+# Only these variables are passed through to plugin subprocesses when the SDK
+# helper is unavailable. Everything else (tokens, keys, agent sockets) is dropped.
+_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR", "PATHEXT"}
+)
+
+
+def _minimal_env() -> dict[str, str]:
+    """Return a minimal environment allowlist for plugin subprocesses."""
+    return {key: os.environ[key] for key in _ENV_ALLOWLIST if key in os.environ}
 
 
 class MCPPluginClient:
@@ -64,8 +83,12 @@ class MCPPluginClient:
         if not self._plugin.command:
             raise ValueError(f"Plugin '{self.name}' requires a command for stdio transport")
 
-        # Build environment: inherit current env, overlay plugin-specific vars
-        env: dict[str, str] = {**os.environ, **self._plugin.env}
+        # Build environment from a minimal safe allowlist, then overlay the
+        # plugin's own declared vars. Do NOT inherit the full parent environment:
+        # that leaked credentials (GITHUB_TOKEN, AWS_*, SSH sockets) to every
+        # third-party plugin subprocess (audit finding C1).
+        base_env = _mcp_default_env() if _mcp_default_env is not None else _minimal_env()
+        env: dict[str, str] = {**base_env, **self._plugin.env}
 
         server_params = StdioServerParameters(
             command=self._plugin.command,
@@ -117,14 +140,19 @@ class MCPPluginClient:
             raise RuntimeError(f"Plugin '{self.name}' is not connected")
 
         response = await self._session.list_tools()
-        return [
-            {
-                "name": tool.name,
-                "description": tool.description or "",
-                "inputSchema": tool.inputSchema,
-            }
-            for tool in response.tools
-        ]
+        tools: list[dict[str, Any]] = []
+        for tool in response.tools:
+            annotations = getattr(tool, "annotations", None)
+            read_only = getattr(annotations, "readOnlyHint", None) if annotations else None
+            tools.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "inputSchema": tool.inputSchema,
+                    "readOnlyHint": read_only,
+                }
+            )
+        return tools
 
     async def call_tool(
         self, tool_name: str, arguments: dict[str, Any], timeout: float = 120.0

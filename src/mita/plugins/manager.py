@@ -57,7 +57,10 @@ class PluginManager:
                 await client.connect()
                 self._clients[plugin.name] = client
                 started.append(plugin.name)
-            except (ConnectionError, OSError, TimeoutError, ValueError, RuntimeError) as e:
+            except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
+                # The MCP SDK/anyio raise McpError, BrokenResourceError, and
+                # ExceptionGroup, none of which subclass the connection errors we
+                # used to catch. A misbehaving plugin must never abort startup.
                 if console:
                     console.print(f"[yellow]Plugin '{plugin.name}' failed to start: {e}[/yellow]")
         return started
@@ -67,7 +70,9 @@ class PluginManager:
         for client in self._clients.values():
             try:
                 await client.disconnect()
-            except (ConnectionError, OSError):
+            except Exception:  # noqa: BLE001 - cleanup must not raise
+                # stop_all runs in finally blocks; one failing disconnect must not
+                # skip the others, leak subprocesses, or mask the original error.
                 pass
         self._clients.clear()
 
@@ -84,7 +89,7 @@ class PluginManager:
             await client.connect()
             self._clients[name] = client
             return True
-        except (ConnectionError, OSError, TimeoutError, ValueError, RuntimeError) as e:
+        except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
             if console:
                 console.print(f"[red]Plugin '{name}' failed to start: {e}[/red]")
             return False
@@ -109,7 +114,7 @@ class PluginManager:
         for pname, client in clients.items():
             try:
                 result[pname] = await client.list_tools()
-            except (ConnectionError, OSError, RuntimeError):
+            except Exception:  # noqa: BLE001 - untrusted plugin boundary
                 result[pname] = []
         return result
 
@@ -123,16 +128,22 @@ class PluginManager:
         for pname, client in self._clients.items():
             try:
                 tools = await client.list_tools()
-            except (ConnectionError, OSError, RuntimeError):
+            except Exception:  # noqa: BLE001 - untrusted plugin boundary
                 continue
 
             for tool in tools:
                 tool_name = f"mcp:{pname}/{tool['name']}"
+                # A third-party plugin tool is treated as destructive (requires
+                # confirmation) UNLESS it explicitly declares readOnlyHint=True.
+                # Without this, plugin tools defaulted to non-destructive and ran
+                # with no confirmation at all (audit finding C2).
+                read_only = tool.get("readOnlyHint") is True
                 definition = ToolDefinition(
                     name=tool_name,
                     description=tool["description"],
                     parameters=_schema_to_parameters(tool.get("inputSchema", {})),
                     source=f"mcp:{pname}",
+                    destructive=not read_only,
                 )
                 handler = _make_mcp_handler(client, tool["name"])
                 registry.register(definition, handler)
@@ -159,7 +170,7 @@ class PluginManager:
                 "tools": len(tools),
                 "tool_names": [t["name"] for t in tools],
             }
-        except (ConnectionError, OSError, RuntimeError) as e:
+        except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
             return {"name": name, "connected": True, "ping": True, "error": str(e)}
 
 
@@ -176,7 +187,7 @@ def _make_mcp_handler(client: MCPPluginClient, remote_tool_name: str) -> ToolHan
                 success=False,
                 error=f"MCP tool '{remote_tool_name}' timed out",
             )
-        except (ConnectionError, OSError, RuntimeError) as e:
+        except Exception as e:  # noqa: BLE001 - a failing plugin tool must not abort the turn
             return ToolResult(
                 tool_call_id="",
                 success=False,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 
 from mita.tools.schema import ToolCall, ToolResult
@@ -46,8 +47,12 @@ def display_markdown(console: Console, text: str) -> None:
 
 
 def display_streaming_token(console: Console, token: str) -> None:
-    """Display a single streaming token (no newline)."""
-    console.print(token, end="", highlight=False)
+    """Display a single streaming token (no newline).
+
+    markup=False: the token is raw model text and must never be parsed as Rich
+    markup, or a token containing '[/x]' raises MarkupError mid-stream.
+    """
+    console.print(token, end="", highlight=False, markup=False)
 
 
 def display_streaming_end(console: Console) -> None:
@@ -61,8 +66,10 @@ def display_tool_call(console: Console, tool_call: ToolCall) -> None:
     # Truncate long args for display
     if len(args_str) > 200:
         args_str = args_str[:200] + "..."
+    # Escape name and args: both can contain '[...]' (e.g. mcp: tool names,
+    # regex/path arguments) that would otherwise be parsed as Rich markup.
     console.print(
-        f"  [mita.tool_name]{tool_call.name}[/mita.tool_name]({args_str})",
+        f"  [mita.tool_name]{escape(tool_call.name)}[/mita.tool_name]({escape(args_str)})",
     )
 
 
@@ -74,19 +81,19 @@ def display_tool_result(console: Console, result: ToolResult) -> None:
             output = result.output
             if len(output) > 500:
                 output = output[:500] + "\n..."
-            console.print(f"  [mita.dim]{output}[/mita.dim]")
+            console.print(f"  [mita.dim]{escape(output)}[/mita.dim]")
     else:
-        console.print(f"  [mita.tool_error]Error: {result.error}[/mita.tool_error]")
+        console.print(f"  [mita.tool_error]Error: {escape(result.error or '')}[/mita.tool_error]")
 
 
 def display_error(console: Console, message: str) -> None:
     """Display an error message."""
-    console.print(f"[mita.error]{message}[/mita.error]")
+    console.print(f"[mita.error]{escape(message)}[/mita.error]")
 
 
 def display_warning(console: Console, message: str) -> None:
     """Display a warning message."""
-    console.print(f"[mita.warning]{message}[/mita.warning]")
+    console.print(f"[mita.warning]{escape(message)}[/mita.warning]")
 
 
 def display_token_usage(console: Console, total_tokens: int) -> None:
@@ -121,8 +128,8 @@ def display_response_stats(
 
 def display_error_with_suggestion(console: Console, error: str, suggestion: str) -> None:
     """Display an error with an actionable suggestion."""
-    console.print(f"[red]{error}[/red]")
-    console.print(f"[dim]  → {suggestion}[/dim]")
+    console.print(f"[red]{escape(error)}[/red]")
+    console.print(f"[dim]  → {escape(suggestion)}[/dim]")
 
 
 async def prompt_user_confirm(console: Console, question: str) -> bool:
@@ -130,7 +137,7 @@ async def prompt_user_confirm(console: Console, question: str) -> bool:
 
     Returns True if the user approves, False otherwise.
     """
-    console.print(f"[mita.warning]{question}[/mita.warning] ", end="")
+    console.print(f"[mita.warning]{escape(question)}[/mita.warning] ", end="")
     try:
         response = console.input("[y/N] ")
         return response.strip().lower() in ("y", "yes")

@@ -266,3 +266,77 @@ class TestPluginManager:
         )
         assert result.success is True
         assert result.output == "Hello, World!"
+
+
+class TestMCPToolConfirmation:
+    """Audit finding C2: plugin tools must pass through the confirmation gate."""
+
+    @staticmethod
+    def _client_with_tool(read_only_hint: object) -> AsyncMock:
+        tool: dict[str, object] = {
+            "name": "do_thing",
+            "description": "Does a thing",
+            "inputSchema": {"type": "object", "properties": {}},
+        }
+        if read_only_hint is not None:
+            tool["readOnlyHint"] = read_only_hint
+        client = AsyncMock()
+        client.list_tools = AsyncMock(return_value=[tool])
+        client.call_tool = AsyncMock(return_value="done")
+        return client
+
+    @pytest.mark.asyncio
+    async def test_plugin_tool_defaults_destructive_and_confirms(self) -> None:
+        from mita.config.schema import ToolSettings
+        from mita.tools.executor import execute_tool
+        from mita.tools.schema import ToolCall
+
+        mgr = PluginManager([])
+        mgr._clients["srv"] = self._client_with_tool(read_only_hint=None)
+        registry = ToolRegistry()
+        await mgr.register_tools(registry)
+
+        definition = registry.get_definition("mcp:srv/do_thing")
+        assert definition is not None
+        assert definition.destructive is True
+
+        prompts: list[str] = []
+
+        async def confirm(prompt: str) -> bool:
+            prompts.append(prompt)
+            return False
+
+        result = await execute_tool(
+            ToolCall(id="1", name="mcp:srv/do_thing", arguments={}),
+            registry,
+            ToolSettings(),
+            confirm_fn=confirm,
+        )
+        assert prompts, "plugin tool must ask for confirmation"
+        assert result.success is False
+        assert "denied" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_read_only_plugin_tool_skips_confirmation(self) -> None:
+        from mita.config.schema import ToolSettings
+        from mita.tools.executor import execute_tool
+        from mita.tools.schema import ToolCall
+
+        mgr = PluginManager([])
+        mgr._clients["srv"] = self._client_with_tool(read_only_hint=True)
+        registry = ToolRegistry()
+        await mgr.register_tools(registry)
+
+        definition = registry.get_definition("mcp:srv/do_thing")
+        assert definition is not None
+        assert definition.destructive is False
+
+        # No confirm_fn: a read-only tool must still run (not be auto-denied).
+        result = await execute_tool(
+            ToolCall(id="1", name="mcp:srv/do_thing", arguments={}),
+            registry,
+            ToolSettings(),
+            confirm_fn=None,
+        )
+        assert result.success is True
+        assert result.output == "done"

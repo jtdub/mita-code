@@ -583,6 +583,53 @@ def ollama_status() -> None:
 # ── Chat / Ask commands ───────────────────────────────────────────
 
 
+def _ensure_project_trust(interactive: bool) -> None:
+    """Prompt to trust a project whose config can run code (audit finding C1).
+
+    If the current project's .mita/settings.toml declares hooks, plugins, or
+    gate-weakening tool settings and the directory is not yet trusted, ask the user
+    (when interactive) whether to trust it. Untrusted security-relevant keys are
+    ignored by load_config until the directory is trusted.
+    """
+    import tomllib
+
+    from mita.config.defaults import get_project_config_path
+    from mita.config.trust import add_trusted, is_trusted, security_relevant_keys
+
+    project_path = get_project_config_path()
+    if project_path is None:
+        return
+    project_root = project_path.parent.parent
+    if is_trusted(project_root):
+        return
+    try:
+        with open(project_path, "rb") as f:
+            project_data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return
+    keys = security_relevant_keys(project_data)
+    if not keys:
+        return
+
+    key_list = ", ".join(keys)
+    console.print(
+        f"[yellow]This project's .mita/settings.toml can run code or change safety "
+        f"settings (keys: {key_list}).[/yellow]"
+    )
+    if not interactive:
+        console.print(
+            "[yellow]Running non-interactively; these settings are ignored. "
+            "Run 'mita chat' here once to trust this directory.[/yellow]"
+        )
+        return
+    answer = console.input(f"Trust {project_root} and apply these settings? [y/N] ").strip().lower()
+    if answer in ("y", "yes"):
+        add_trusted(project_root)
+        console.print(f"[green]Trusted {project_root}.[/green]")
+    else:
+        console.print("[yellow]Not trusted. These settings are ignored this session.[/yellow]")
+
+
 @app.command("chat")
 def chat_command(
     no_tools: Annotated[
@@ -610,6 +657,7 @@ def chat_command(
     from mita.ui.display import get_console
     from mita.ui.repl import repl_loop
 
+    _ensure_project_trust(interactive=True)
     cfg = _load_config()
 
     if permission is not None:
@@ -714,6 +762,7 @@ def ask_command(
     if effective_output is None:
         effective_output = OutputFormat.TEXT if not sys.stdout.isatty() else OutputFormat.RICH
 
+    _ensure_project_trust(interactive=False)
     cfg = _load_config()
 
     # Build the console for this run

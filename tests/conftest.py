@@ -31,3 +31,17 @@ def _isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(fake_home))
     # Also patch Path.home() for consistency
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate the working directory.
+
+    Without this, project-root discovery walks up from the real cwd and loads the
+    repository's own .mita/settings.toml (which declares a ruff --fix file-write
+    hook), so the suite could execute that hook against source files. Chdir into a
+    neutral temp dir with no project markers above it. See audit finding C8.
+    """
+    workdir = tmp_path / "cwd"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)

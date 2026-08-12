@@ -48,19 +48,28 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     if not base.is_dir():
         return ToolResult(tool_call_id="", success=False, error=f"Not a directory: {base}")
 
-    from mita.tools.safety import validate_search_base
+    from mita.tools.safety import (
+        validate_glob_pattern,
+        validate_path_for_read,
+        validate_search_base,
+    )
 
     base_error = validate_search_base(base)
     if base_error:
         return ToolResult(tool_call_id="", success=False, error=base_error)
+
+    pattern_error = validate_glob_pattern(pattern)
+    if pattern_error:
+        return ToolResult(tool_call_id="", success=False, error=pattern_error)
 
     try:
         matches = sorted(base.glob(pattern))
     except ValueError as e:
         return ToolResult(tool_call_id="", success=False, error=f"Invalid glob pattern: {e}")
 
-    # Filter out directories, keep only files
-    files = [str(m) for m in matches if m.is_file()]
+    # Keep only files inside the workspace. Resolve each match so an in-tree
+    # symlink that points outside the workspace is rejected, not followed.
+    files = [str(m) for m in matches if m.is_file() and validate_path_for_read(m.resolve()) is None]
 
     if not files:
         return ToolResult(tool_call_id="", success=True, output="No files matched.")
