@@ -58,7 +58,15 @@ def load_memory(
     if not sections:
         return ""
 
-    return "<memory>\n" + "\n\n".join(sections) + "\n</memory>"
+    body = "\n\n".join(sections)
+
+    # Cap the total injected memory so many MITA.md files can't blow up the context
+    # window. ~4 chars/token, consistent with conversation token estimation (S5).
+    max_chars = settings.max_total_tokens * 4
+    if len(body) > max_chars:
+        body = body[:max_chars].rstrip() + "\n<!-- memory truncated to fit max_total_tokens -->"
+
+    return "<memory>\n" + body + "\n</memory>"
 
 
 def load_memory_raw(cwd: Path | None = None) -> list[tuple[Path, str, str]]:
