@@ -48,6 +48,8 @@ def _schema_to_parameters(input_schema: dict[str, Any]) -> list[ToolParameter]:
                 description=prop.get("description", ""),
                 required=name in required,
                 default=prop.get("default"),
+                # Preserve the full property schema (enum/items/nested) for MCP tools.
+                json_schema=prop if isinstance(prop, dict) else None,
             )
         )
     return params

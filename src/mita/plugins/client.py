@@ -67,6 +67,8 @@ class MCPPluginClient:
                 await self._connect_stdio(timeout)
             elif self._plugin.transport == "sse":
                 await self._connect_sse(timeout)
+            elif self._plugin.transport == "streamable_http":
+                await self._connect_streamable_http(timeout)
             else:
                 raise ValueError(f"Unsupported transport: {self._plugin.transport}")
         except Exception:
@@ -115,8 +117,34 @@ class MCPPluginClient:
 
         from mcp.client.sse import sse_client
 
-        transport = await self._exit_stack.enter_async_context(sse_client(self._plugin.url))
+        headers = self._plugin.headers or None
+        transport = await self._exit_stack.enter_async_context(
+            sse_client(self._plugin.url, headers=headers)
+        )
         read_stream, write_stream = transport
+
+        session = await self._exit_stack.enter_async_context(
+            ClientSession(read_stream, write_stream)
+        )
+        await asyncio.wait_for(session.initialize(), timeout=timeout)
+        self._session = session
+
+    async def _connect_streamable_http(self, timeout: float) -> None:
+        """Connect via Streamable HTTP transport (2025-03-26 replacement for HTTP+SSE)."""
+        if self._exit_stack is None:
+            raise RuntimeError("connect() must be called before _connect_streamable_http()")
+
+        if not self._plugin.url:
+            raise ValueError(f"Plugin '{self.name}' requires a url for streamable_http transport")
+
+        from mcp.client.streamable_http import streamablehttp_client
+
+        headers = self._plugin.headers or None
+        transport = await self._exit_stack.enter_async_context(
+            streamablehttp_client(self._plugin.url, headers=headers)
+        )
+        # Streamable HTTP yields a third element (a session-id callback) we don't need.
+        read_stream, write_stream = transport[0], transport[1]
 
         session = await self._exit_stack.enter_async_context(
             ClientSession(read_stream, write_stream)

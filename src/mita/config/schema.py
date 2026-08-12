@@ -284,11 +284,21 @@ class PluginDefinition(BaseModel):
     """An MCP plugin server definition."""
 
     name: str
-    transport: str = "stdio"
+    transport: str = "stdio"  # stdio | sse | streamable_http
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     url: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
+    # HTTP headers for sse/streamable_http transports (auth). Values expand ${ENV_VAR}
+    # so tokens aren't stored in TOML (audit finding F2.2).
+    headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("transport")
+    @classmethod
+    def validate_transport(cls, v: str) -> str:
+        if v not in ("stdio", "sse", "streamable_http"):
+            raise ValueError(f"transport must be stdio, sse, or streamable_http, got: {v}")
+        return v
 
     @field_validator("url")
     @classmethod
@@ -296,6 +306,11 @@ class PluginDefinition(BaseModel):
         if v is not None and not v.startswith(("http://", "https://")):
             raise ValueError(f"Plugin URL must start with http:// or https://, got: {v}")
         return v
+
+    @field_validator("headers")
+    @classmethod
+    def expand_header_env(cls, v: dict[str, str]) -> dict[str, str]:
+        return {k: os.path.expandvars(val) for k, val in v.items()}
 
 
 class UISettings(BaseModel):

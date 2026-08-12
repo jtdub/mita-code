@@ -6,10 +6,44 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from mita.config.defaults import get_global_config_path, get_project_config_path
 from mita.config.schema import MitaConfig
+
+
+def _unknown_keys(data: dict[str, Any], model_cls: type[BaseModel], prefix: str = "") -> list[str]:
+    """Return dotted keys in ``data`` that aren't fields of ``model_cls`` (recursively).
+
+    Pydantic silently ignores unknown keys, so a typo like ``max_iteration`` or ``[modell]``
+    no-ops with no feedback. Surfacing them lets the CLI warn (audit finding S2).
+    """
+    unknown: list[str] = []
+    fields = model_cls.model_fields
+    for key, value in data.items():
+        if key not in fields:
+            unknown.append(f"{prefix}{key}")
+            continue
+        annotation = fields[key].annotation
+        if (
+            isinstance(value, dict)
+            and isinstance(annotation, type)
+            and issubclass(annotation, BaseModel)
+        ):
+            unknown.extend(_unknown_keys(value, annotation, prefix=f"{prefix}{key}."))
+    return unknown
+
+
+def find_unknown_config_keys(project_root: Path | None = None) -> list[str]:
+    """Load the merged config dict and return any keys the schema doesn't recognize."""
+    merged: dict[str, Any] = {}
+    global_path = get_global_config_path()
+    if global_path.is_file():
+        merged = _load_toml(global_path)
+    project_path = get_project_config_path(project_root)
+    if project_path is not None:
+        merged = _deep_merge(merged, _load_toml(project_path))
+    return _unknown_keys(merged, MitaConfig)
 
 
 class ConfigError(Exception):

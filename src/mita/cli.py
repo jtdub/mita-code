@@ -776,8 +776,31 @@ def chat_command(
                 nonlocal conversation
                 conversation.clear_non_system()
 
+            def on_reload() -> None:
+                # Re-read config + memory and rebuild the system prompt in place, keeping
+                # the conversation history (audit finding S7).
+                nonlocal cfg
+                from mita.agent.context import assemble_context
+                from mita.agent.conversation import Conversation, Role
+                from mita.config.loader import ConfigError
+                from mita.config.loader import load_config as _lc
+
+                try:
+                    cfg = _lc()
+                except ConfigError as e:
+                    chat_console.print(f"[red]Reload failed (keeping old config): {e}[/red]")
+                    return
+                fresh = Conversation()
+                assemble_context(fresh, cfg, registry)
+                non_system = [m for m in conversation.messages if m.role != Role.SYSTEM]
+                conversation.messages = [fresh.messages[0], *non_system]
+
             await repl_loop(
-                chat_console, on_input, on_clear=on_clear, skills_paths=cfg.skills_paths
+                chat_console,
+                on_input,
+                on_clear=on_clear,
+                skills_paths=cfg.skills_paths,
+                on_reload=on_reload,
             )
         finally:
             if plugin_mgr is not None:
@@ -964,6 +987,14 @@ def doctor_command() -> None:
 
     # 6. Config loads without error (already verified by the load_config() above)
     doc_console.print("  [green]\u2713[/green] Config loaded successfully")
+
+    from mita.config.loader import find_unknown_config_keys
+
+    unknown = find_unknown_config_keys()
+    if unknown:
+        doc_console.print(
+            f"  [yellow]![/yellow] Unknown config keys (ignored): {', '.join(unknown)}"
+        )
 
     # 7. Memory files discoverable
     from mita.memory.discovery import discover_memory_files

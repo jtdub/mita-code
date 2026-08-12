@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [develop]
 
+# Cancel superseded runs on the same ref instead of running them redundantly.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only needs to read the repository.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint & Format
@@ -85,7 +94,7 @@ jobs:
         run: poetry install --no-interaction
 
       - name: Run tests
-        run: poetry run pytest tests/ -v --tb=short
+        run: poetry run pytest tests/ -v --tb=short --cov-report=xml
 
       - name: Verify CLI
         run: poetry run mita --version

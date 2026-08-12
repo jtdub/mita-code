@@ -12,7 +12,7 @@ from rich.console import Console
 from mita.ui.display import display_goodbye, display_welcome
 
 # Built-in REPL commands that should NOT be treated as skill invocations.
-_BUILTIN_COMMANDS = frozenset({"/quit", "/exit", "/q", "/clear"})
+_BUILTIN_COMMANDS = frozenset({"/quit", "/exit", "/q", "/clear", "/reload", "/help"})
 
 
 async def repl_loop(
@@ -20,6 +20,7 @@ async def repl_loop(
     on_input: Callable[[str], Coroutine[Any, Any, None]],
     on_clear: Callable[[], None] | None = None,
     skills_paths: list[str] | None = None,
+    on_reload: Callable[[], None] | None = None,
 ) -> None:
     """Run the interactive REPL.
 
@@ -28,6 +29,7 @@ async def repl_loop(
         on_input: Async callback called with each user input line.
         on_clear: Callback invoked when the user types /clear.
         skills_paths: Skill search paths for ``/`` prefix invocation.
+        on_reload: Callback invoked when the user types /reload (re-read memory/config).
     """
     display_welcome(console)
 
@@ -48,10 +50,24 @@ async def repl_loop(
             display_goodbye(console)
             break
 
+        if user_input.lower() == "/help":
+            console.print(
+                "[mita.dim]Commands: /clear (reset conversation), /reload (re-read "
+                "memory + config), /quit. Anything else is sent to the agent; "
+                "/<name> runs a skill.[/mita.dim]"
+            )
+            continue
+
         if user_input.lower() == "/clear":
             if on_clear is not None:
                 on_clear()
             console.print("[mita.dim]Conversation cleared.[/mita.dim]")
+            continue
+
+        if user_input.lower() == "/reload":
+            if on_reload is not None:
+                on_reload()
+            console.print("[mita.dim]Reloaded memory and config.[/mita.dim]")
             continue
 
         # Skill invocation: /name [args]

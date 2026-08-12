@@ -15,6 +15,10 @@ class ToolParameter(BaseModel):
     description: str
     required: bool = True
     default: Any | None = None
+    # Full JSON Schema fragment for this property, when available (MCP tools). Preserves
+    # enum/items/nested/format that the flat fields drop, so strict providers accept the
+    # request (audit finding F4.1). None for built-in tools (the flat fields suffice).
+    json_schema: dict[str, Any] | None = None
 
 
 class ToolDefinition(BaseModel):
@@ -32,12 +36,15 @@ class ToolDefinition(BaseModel):
         required: list[str] = []
 
         for param in self.parameters:
-            prop: dict[str, Any] = {
-                "type": param.type,
-                "description": param.description,
-            }
-            if param.default is not None:
-                prop["default"] = param.default
+            if param.json_schema is not None:
+                # Pass the original property schema through verbatim (keeps enum/items/
+                # nested/format), just ensuring a description is present.
+                prop = dict(param.json_schema)
+                prop.setdefault("description", param.description)
+            else:
+                prop = {"type": param.type, "description": param.description}
+                if param.default is not None:
+                    prop["default"] = param.default
             properties[param.name] = prop
             if param.required:
                 required.append(param.name)

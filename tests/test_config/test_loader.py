@@ -141,3 +141,34 @@ class TestListDedup:
         hook = {"event": "session_start", "command": "echo hi"}
         result = _deep_merge({"hooks": [hook]}, {"hooks": [dict(hook)]})
         assert result["hooks"] == [hook]
+
+
+class TestUnknownKeys:
+    """Audit finding S2: unknown config keys are detected (so the CLI can warn)."""
+
+    def test_detects_unknown_top_level(self, tmp_project: Path) -> None:
+        from mita.config.loader import find_unknown_config_keys
+
+        mita_dir = tmp_project / ".mita"
+        mita_dir.mkdir(exist_ok=True)
+        (mita_dir / "settings.toml").write_text("max_iteration = 5\ntotally_bogus = 1\n")
+        unknown = find_unknown_config_keys(project_root=tmp_project)
+        assert "max_iteration" in unknown
+        assert "totally_bogus" in unknown
+
+    def test_detects_unknown_nested(self, tmp_project: Path) -> None:
+        from mita.config.loader import find_unknown_config_keys
+
+        mita_dir = tmp_project / ".mita"
+        mita_dir.mkdir(exist_ok=True)
+        (mita_dir / "settings.toml").write_text("[model]\nnope = true\n")
+        unknown = find_unknown_config_keys(project_root=tmp_project)
+        assert "model.nope" in unknown
+
+    def test_known_keys_are_clean(self, tmp_project: Path) -> None:
+        from mita.config.loader import find_unknown_config_keys
+
+        mita_dir = tmp_project / ".mita"
+        mita_dir.mkdir(exist_ok=True)
+        (mita_dir / "settings.toml").write_text('[model]\ndefault = "x"\nmax_tokens = 2048\n')
+        assert find_unknown_config_keys(project_root=tmp_project) == []
