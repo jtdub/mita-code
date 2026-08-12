@@ -22,17 +22,7 @@ from mita.llm.streaming import extract_delta_content
 from mita.tools.executor import execute_tool
 from mita.tools.registry import ToolRegistry, create_default_registry
 from mita.tools.schema import ToolCall
-from mita.ui.display import (
-    display_error,
-    display_markdown,
-    display_response_stats,
-    display_streaming_end,
-    display_streaming_token,
-    display_tool_call,
-    display_tool_result,
-    prompt_user_confirm_decision,
-)
-from mita.ui.spinner import thinking_spinner
+from mita.ui.sink import ConfirmDecision, ConfirmRequest, RichConsoleSink, UISink
 
 _logger = logging.getLogger(__name__)
 
@@ -48,13 +38,14 @@ async def run_agent(
     llm_client: LLMClient | None = None,
     session_approved: set[str] | None = None,
     auto_confirm: bool = False,
+    sink: UISink | None = None,
 ) -> Conversation:
     """Run the agent loop for a single user prompt.
 
     Args:
         user_prompt: The user's input.
         config: Application configuration.
-        console: Rich console for output.
+        console: Rich console for output (used to build the default sink).
         conversation: Existing conversation to continue, or None to start fresh.
         registry: Tool registry, or None to create default.
         llm_client: LLM client, or None to create from config.
@@ -62,11 +53,15 @@ async def run_agent(
             The loop adds a tool name here when the user answers "always".
         auto_confirm: When True, approve destructive actions without prompting
             (used by non-interactive `mita ask --yes`).
+        sink: UI event sink; defaults to a RichConsoleSink over ``console``. A Textual
+            TUI passes its own sink so the loop needs no changes.
 
     Returns:
         The updated conversation.
     """
     # Initialize
+    if sink is None:
+        sink = RichConsoleSink(console)
     if registry is None:
         registry = create_default_registry()
 
@@ -138,31 +133,30 @@ async def run_agent(
 
             if config.ui.stream:
                 assistant_text, tool_calls_raw, stats = await _stream_response(
-                    llm_client, messages, tool_schemas, console
+                    llm_client, messages, tool_schemas, sink
                 )
                 if config.ui.show_token_count:
-                    display_response_stats(
-                        console,
-                        prompt_tokens=stats.prompt_tokens,
-                        completion_tokens=stats.completion_tokens,
-                        total_time=stats.total_time,
-                        ttft=stats.ttft,
+                    sink.response_stats(
+                        stats.prompt_tokens,
+                        stats.completion_tokens,
+                        stats.total_time,
+                        stats.ttft,
                     )
             else:
                 t0 = time.monotonic()
-                with thinking_spinner(console):
+                with sink.busy("Thinking..."):
                     response = await llm_client.chat(messages, tools=tool_schemas)
                 elapsed = time.monotonic() - t0
                 assistant_text, tool_calls_raw = _parse_response(response)
                 if assistant_text:
-                    display_markdown(console, assistant_text)
+                    sink.assistant_message(assistant_text)
                 if config.ui.show_token_count:
                     usage = _extract_usage(response) or {}
-                    display_response_stats(
-                        console,
-                        prompt_tokens=usage.get("prompt_tokens", 0),
-                        completion_tokens=usage.get("completion_tokens", 0),
-                        total_time=elapsed,
+                    sink.response_stats(
+                        usage.get("prompt_tokens", 0),
+                        usage.get("completion_tokens", 0),
+                        elapsed,
+                        None,
                     )
 
             # Fallback: parse tool calls from text if model didn't use native calling
@@ -188,9 +182,8 @@ async def run_agent(
                 if sig == last_tool_signature:
                     repeat_count += 1
                     if repeat_count >= 1:
-                        display_error(
-                            console,
-                            "Detected repeated tool call — stopping to avoid infinite loop.",
+                        sink.error(
+                            "Detected repeated tool call — stopping to avoid infinite loop."
                         )
                         conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
                         break
@@ -210,9 +203,10 @@ async def run_agent(
                     conversation,
                     registry,
                     config,
-                    console,
+                    sink,
                     session_approved,
                     auto_confirm=auto_confirm,
+                    console=console,
                 )
                 continue
 
@@ -224,31 +218,28 @@ async def run_agent(
             # Ctrl-C surfaces as KeyboardInterrupt under asyncio.run, and as
             # CancelledError when a turn task is cancelled. Handle both so the
             # conversation stays valid and session_end hooks still run.
-            display_error(console, "[Interrupted]")
+            sink.error("[Interrupted]")
             if assistant_text:
                 conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
             break
         except (ConnectionError, TimeoutError, OSError) as e:
             _logger.warning("LLM call failed: %s", e, exc_info=True)
-            display_error(console, f"LLM error: {e}")
+            sink.error(f"LLM error: {e}")
             if assistant_text:
                 conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
             break
         except json.JSONDecodeError as e:
             _logger.warning("Failed to parse LLM response: %s", e, exc_info=True)
-            display_error(console, f"Response parse error: {e}")
+            sink.error(f"Response parse error: {e}")
             break
         except Exception as e:  # noqa: BLE001
             _logger.error("Unexpected error in agent loop: %s", e, exc_info=True)
-            display_error(console, f"Unexpected error: {e}")
+            sink.error(f"Unexpected error: {e}")
             if assistant_text:
                 conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
             break
     else:
-        display_error(
-            console,
-            f"Reached maximum iterations ({max_iterations}). Stopping.",
-        )
+        sink.error(f"Reached maximum iterations ({max_iterations}). Stopping.")
 
     # Fire session_end hooks
     if config.hooks:
@@ -278,7 +269,7 @@ async def _stream_response(
     client: LLMClient,
     messages: list[dict[str, Any]],
     tool_schemas: list[dict[str, Any]],
-    console: Console,
+    sink: UISink,
 ) -> tuple[str, list[dict[str, Any]], _ResponseStats]:
     """Stream the LLM response, displaying tokens as they arrive.
 
@@ -292,7 +283,7 @@ async def _stream_response(
     start_time = time.monotonic()
 
     spinner_stack = contextlib.ExitStack()
-    spinner_stack.enter_context(thinking_spinner(console))
+    spinner_stack.enter_context(sink.busy("Thinking..."))
 
     try:
         async for chunk in client.stream_chat(messages, tools=tool_schemas):
@@ -304,7 +295,7 @@ async def _stream_response(
             delta = extract_delta_content(chunk)
             if delta:
                 text_parts.append(delta)
-                display_streaming_token(console, delta)
+                sink.stream_token(delta)
 
             _accumulate_tool_call_deltas(chunk, tool_calls_by_index)
 
@@ -319,7 +310,7 @@ async def _stream_response(
     full_text = "".join(text_parts)
 
     if full_text:
-        display_streaming_end(console)
+        sink.stream_end()
 
     tool_calls_raw = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
     return full_text, tool_calls_raw, stats
@@ -553,9 +544,10 @@ async def _process_tool_calls(
     conversation: Conversation,
     registry: ToolRegistry,
     config: MitaConfig,
-    console: Console,
+    sink: UISink,
     session_approved: set[str] | None = None,
     auto_confirm: bool = False,
+    console: Console | None = None,
 ) -> None:
     """Process tool calls from an LLM response.
 
@@ -591,7 +583,7 @@ async def _process_tool_calls(
             tool_call = ToolCall(id=tc_id, name=name, arguments=arguments)
 
             # Display the tool call
-            display_tool_call(console, tool_call)
+            sink.tool_call(tool_call)
 
             # Fire pre_tool_call hooks
             if _run_hooks is not None:
@@ -603,17 +595,17 @@ async def _process_tool_calls(
                     timeout=config.hook_settings.timeout,
                 )
 
-            # Confirmation: auto-approve when requested, else prompt with an
+            # Confirmation: auto-approve when requested, else ask the sink with an
             # allow-for-session option that adds the tool to session_approved.
             async def confirm_fn(prompt: str, _name: str = name) -> bool:
                 if auto_confirm:
                     return True
-                decision = await prompt_user_confirm_decision(console, prompt)
-                if decision == "always":
+                decision = await sink.confirm(ConfirmRequest(tool_name=_name, summary=prompt))
+                if decision == ConfirmDecision.ALLOW_SESSION:
                     if session_approved is not None:
                         session_approved.add(_name)
                     return True
-                return decision == "once"
+                return decision == ConfirmDecision.ALLOW_ONCE
 
             # Execute with safety checks
             result = await execute_tool(
@@ -625,7 +617,7 @@ async def _process_tool_calls(
             )
 
             # Display result
-            display_tool_result(console, result)
+            sink.tool_result(result)
 
             # Fire post_tool_call hooks
             if _run_hooks is not None:
