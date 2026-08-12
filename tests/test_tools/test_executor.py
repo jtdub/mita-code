@@ -169,3 +169,29 @@ class TestExecuteTool:
         settings = ToolSettings(grep_max_matches=99)
         await execute_tool(call, reg, settings)
         assert captured_args.get("_max_matches") == 99
+
+
+class TestCoreBannedAndShellInjection:
+    """Audit finding S11 + shell confinement."""
+
+    @pytest.mark.asyncio()
+    async def test_core_banned_survives_config_override(self, registry: ToolRegistry) -> None:
+        # User replaces banned_commands, dropping the built-in guard from config.
+        settings = ToolSettings(banned_commands=["harmless"])
+        result = await execute_tool(
+            ToolCall(id="1", name="shell", arguments={"command": "rm -rf /"}),
+            registry,
+            settings,
+        )
+        assert result.success is False
+        assert "banned" in (result.error or "").lower()
+
+    @pytest.mark.asyncio()
+    async def test_shell_gets_cwd_and_timeout_cap(self, registry: ToolRegistry) -> None:
+        # The echo handler returns str(args); assert the executor injected confinement.
+        settings = ToolSettings(shell_timeout=42, permission_mode=PermissionMode.TRUST)
+        call = ToolCall(id="1", name="shell", arguments={"command": "ls"})
+        result = await execute_tool(call, registry, settings)
+        assert result.success is True
+        assert "_cwd" in call.arguments
+        assert call.arguments["_timeout_cap"] == 42

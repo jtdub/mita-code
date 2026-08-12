@@ -137,6 +137,22 @@ class TestMCPPluginClient:
         client._session.call_tool.assert_awaited_once_with("read_file", {"path": "/tmp/test.txt"})
 
     @pytest.mark.asyncio
+    async def test_call_tool_is_error_raises(self, stdio_plugin: PluginDefinition) -> None:
+        """A result with isError=True must not be reported as success."""
+        mock_content = MagicMock()
+        mock_content.text = "tool exploded"
+        mock_result = MagicMock()
+        mock_result.content = [mock_content]
+        mock_result.isError = True
+
+        client = MCPPluginClient(stdio_plugin)
+        client._session = AsyncMock()
+        client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        with pytest.raises(RuntimeError, match="tool exploded"):
+            await client.call_tool("boom", {})
+
+    @pytest.mark.asyncio
     async def test_disconnect(self, stdio_plugin: PluginDefinition) -> None:
         client = MCPPluginClient(stdio_plugin)
         client._session = AsyncMock()

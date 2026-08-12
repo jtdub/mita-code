@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 from typing import Any
 
 from rich.console import Console
@@ -13,6 +15,23 @@ from mita.tools.registry import ToolHandler, ToolRegistry
 from mita.tools.schema import ToolDefinition, ToolParameter, ToolResult
 
 _logger = logging.getLogger(__name__)
+
+
+def mcp_tool_name(plugin: str, tool: str) -> str:
+    """Build a registry/function name for an MCP tool.
+
+    OpenAI-compatible function names must match ^[a-zA-Z0-9_-]{1,64}$, so the old
+    ``mcp:{plugin}/{tool}`` scheme (with ':' and '/') was rejected by strict
+    providers and failed the whole request. Sanitize to underscores and, if the
+    name would exceed 64 chars, append a short hash of the original (finding: MCP
+    tool-name charset).
+    """
+    raw = f"mcp_{plugin}_{tool}"
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", raw)
+    if len(safe) > 64:
+        digest = hashlib.sha1(raw.encode()).hexdigest()[:8]
+        safe = f"{safe[:55]}_{digest}"
+    return safe
 
 
 def _schema_to_parameters(input_schema: dict[str, Any]) -> list[ToolParameter]:
@@ -132,7 +151,7 @@ class PluginManager:
                 continue
 
             for tool in tools:
-                tool_name = f"mcp:{pname}/{tool['name']}"
+                tool_name = mcp_tool_name(pname, tool["name"])
                 # A third-party plugin tool is treated as destructive (requires
                 # confirmation) UNLESS it explicitly declares readOnlyHint=True.
                 # Without this, plugin tools defaulted to non-destructive and ran

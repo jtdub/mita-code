@@ -389,7 +389,11 @@ class TestProcessToolCalls:
         with (
             patch("mita.agent.loop.display_tool_call"),
             patch("mita.agent.loop.display_tool_result"),
-            patch("mita.agent.loop.prompt_user_confirm", new_callable=AsyncMock, return_value=True),
+            patch(
+                "mita.agent.loop.prompt_user_confirm_decision",
+                new_callable=AsyncMock,
+                return_value="once",
+            ),
         ):
             await _process_tool_calls(tool_calls_raw, conv, registry, config, mock_console)
 
@@ -418,7 +422,11 @@ class TestProcessToolCalls:
         with (
             patch("mita.agent.loop.display_tool_call"),
             patch("mita.agent.loop.display_tool_result"),
-            patch("mita.agent.loop.prompt_user_confirm", new_callable=AsyncMock, return_value=True),
+            patch(
+                "mita.agent.loop.prompt_user_confirm_decision",
+                new_callable=AsyncMock,
+                return_value="once",
+            ),
         ):
             await _process_tool_calls(tool_calls_raw, conv, registry, config, mock_console)
 
@@ -446,9 +454,97 @@ class TestProcessToolCalls:
         with (
             patch("mita.agent.loop.display_tool_call"),
             patch("mita.agent.loop.display_tool_result"),
-            patch("mita.agent.loop.prompt_user_confirm", new_callable=AsyncMock, return_value=True),
+            patch(
+                "mita.agent.loop.prompt_user_confirm_decision",
+                new_callable=AsyncMock,
+                return_value="once",
+            ),
         ):
             await _process_tool_calls(tool_calls_raw, conv, registry, config, mock_console)
 
         tool_msgs = [m for m in conv.messages if m.role == Role.TOOL]
         assert len(tool_msgs) == 1
+
+
+class TestConfirmationAndInterrupt:
+    """Audit should-fix: allow-for-session, auto_confirm, interrupt backfill."""
+
+    def _destructive_call(self) -> list[dict]:
+        return [
+            {
+                "id": "tc1",
+                "function": {"name": "shell", "arguments": '{"command": "shred /tmp/x"}'},
+            }
+        ]
+
+    @pytest.mark.asyncio()
+    async def test_always_adds_to_session_approved(self) -> None:
+        config = MitaConfig()
+        conv = Conversation()
+        registry = create_default_registry()
+        session: set[str] = set()
+
+        with (
+            patch("mita.agent.loop.display_tool_call"),
+            patch("mita.agent.loop.display_tool_result"),
+            patch(
+                "mita.agent.loop.prompt_user_confirm_decision",
+                new_callable=AsyncMock,
+                return_value="always",
+            ),
+        ):
+            await _process_tool_calls(
+                self._destructive_call(), conv, registry, config, MagicMock(), session
+            )
+
+        assert "shell" in session
+
+    @pytest.mark.asyncio()
+    async def test_auto_confirm_skips_prompt(self) -> None:
+        config = MitaConfig()
+        conv = Conversation()
+        registry = create_default_registry()
+
+        prompt = AsyncMock(return_value="deny")
+        with (
+            patch("mita.agent.loop.display_tool_call"),
+            patch("mita.agent.loop.display_tool_result"),
+            patch("mita.agent.loop.prompt_user_confirm_decision", prompt),
+        ):
+            await _process_tool_calls(
+                self._destructive_call(),
+                conv,
+                registry,
+                config,
+                MagicMock(),
+                None,
+                auto_confirm=True,
+            )
+
+        prompt.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_interrupt_backfills_tool_results(self) -> None:
+        """If a tool call raises mid-batch, every tool_call still gets a TOOL result."""
+        config = MitaConfig()
+        conv = Conversation()
+        registry = create_default_registry()
+        calls = [
+            {"id": "tc1", "function": {"name": "file_read", "arguments": '{"path": "/tmp/none"}'}},
+            {"id": "tc2", "function": {"name": "file_read", "arguments": '{"path": "/tmp/none2"}'}},
+        ]
+
+        with (
+            patch("mita.agent.loop.display_tool_call"),
+            patch("mita.agent.loop.display_tool_result"),
+            patch(
+                "mita.agent.loop.execute_tool",
+                new_callable=AsyncMock,
+                side_effect=KeyboardInterrupt,
+            ),
+        ):
+            with pytest.raises(KeyboardInterrupt):
+                await _process_tool_calls(calls, conv, registry, config, MagicMock())
+
+        tool_ids = {m.tool_call_id for m in conv.messages if m.role == Role.TOOL}
+        assert tool_ids == {"tc1", "tc2"}

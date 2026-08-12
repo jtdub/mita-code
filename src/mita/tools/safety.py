@@ -10,6 +10,18 @@ from mita.config.schema import ToolSettings
 from mita.tools.builtins.git import is_safe_git_command
 from mita.tools.schema import ToolCall, ToolDefinition
 
+# Commands that are ALWAYS banned, regardless of the user's banned_commands config.
+# Pydantic replaces (does not merge) a list default when config overrides it, so
+# without this a user who sets `banned_commands = [...]` would silently drop the
+# built-in guards. These are enforced on top of the configured list (finding S11).
+CORE_BANNED_COMMANDS: list[str] = [
+    "rm -rf /",
+    "rm -rf /*",
+    "mkfs",
+    "dd if=/dev/zero",
+    ":(){ :|:& };:",  # fork bomb
+]
+
 # Paths that should never be read or written by tools
 SENSITIVE_PATH_PATTERNS: list[str] = [
     ".ssh",

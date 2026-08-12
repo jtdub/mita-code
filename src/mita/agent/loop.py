@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -29,7 +30,7 @@ from mita.ui.display import (
     display_streaming_token,
     display_tool_call,
     display_tool_result,
-    prompt_user_confirm,
+    prompt_user_confirm_decision,
 )
 from mita.ui.spinner import thinking_spinner
 
@@ -46,6 +47,7 @@ async def run_agent(
     registry: ToolRegistry | None = None,
     llm_client: LLMClient | None = None,
     session_approved: set[str] | None = None,
+    auto_confirm: bool = False,
 ) -> Conversation:
     """Run the agent loop for a single user prompt.
 
@@ -57,7 +59,9 @@ async def run_agent(
         registry: Tool registry, or None to create default.
         llm_client: LLM client, or None to create from config.
         session_approved: Tool names approved for the session (skip confirmation).
-            Not mutated by the agent loop — callers manage the set.
+            The loop adds a tool name here when the user answers "always".
+        auto_confirm: When True, approve destructive actions without prompting
+            (used by non-interactive `mita ask --yes`).
 
     Returns:
         The updated conversation.
@@ -195,7 +199,13 @@ async def run_agent(
                     )
                 )
                 await _process_tool_calls(
-                    tool_calls_raw, conversation, registry, config, console, session_approved
+                    tool_calls_raw,
+                    conversation,
+                    registry,
+                    config,
+                    console,
+                    session_approved,
+                    auto_confirm=auto_confirm,
                 )
                 continue
 
@@ -203,9 +213,11 @@ async def run_agent(
             conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
             break
 
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # Ctrl-C surfaces as KeyboardInterrupt under asyncio.run, and as
+            # CancelledError when a turn task is cancelled. Handle both so the
+            # conversation stays valid and session_end hooks still run.
             display_error(console, "[Interrupted]")
-            # Add any partial response as assistant message
             if assistant_text:
                 conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
             break
@@ -536,8 +548,15 @@ async def _process_tool_calls(
     config: MitaConfig,
     console: Console,
     session_approved: set[str] | None = None,
+    auto_confirm: bool = False,
 ) -> None:
-    """Process tool calls from an LLM response."""
+    """Process tool calls from an LLM response.
+
+    Every tool call in ``tool_calls_raw`` is guaranteed a matching TOOL result
+    message, even if the batch is interrupted mid-way. Without that, the assistant
+    message carries tool_calls with no answers and the next request 400s on
+    OpenAI-compatible endpoints.
+    """
     # Import hooks runner once if hooks are configured
     _run_hooks = None
     if config.hooks:
@@ -545,80 +564,107 @@ async def _process_tool_calls(
 
         _run_hooks = run_hooks
 
-    for tc_raw in tool_calls_raw:
-        func = tc_raw.get("function", {})
-        tc_id = tc_raw.get("id", str(uuid.uuid4()))
-        name = func.get("name", "") if isinstance(func, dict) else ""
-        args_raw = func.get("arguments", "{}") if isinstance(func, dict) else "{}"
+    answered: set[str] = set()
+    try:
+        for tc_raw in tool_calls_raw:
+            func = tc_raw.get("function", {})
+            tc_id = tc_raw.get("id", str(uuid.uuid4()))
+            name = func.get("name", "") if isinstance(func, dict) else ""
+            args_raw = func.get("arguments", "{}") if isinstance(func, dict) else "{}"
 
-        # Parse arguments
-        if isinstance(args_raw, str):
-            try:
-                arguments = json.loads(args_raw)
-            except json.JSONDecodeError:
-                arguments = {}
-        else:
-            arguments = args_raw if isinstance(args_raw, dict) else {}
+            # Parse arguments
+            if isinstance(args_raw, str):
+                try:
+                    arguments = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    arguments = {}
+            else:
+                arguments = args_raw if isinstance(args_raw, dict) else {}
 
-        tool_call = ToolCall(id=tc_id, name=name, arguments=arguments)
+            tool_call = ToolCall(id=tc_id, name=name, arguments=arguments)
 
-        # Display the tool call
-        display_tool_call(console, tool_call)
+            # Display the tool call
+            display_tool_call(console, tool_call)
 
-        # Fire pre_tool_call hooks
-        if _run_hooks is not None:
-            await _run_hooks(
-                "pre_tool_call",
-                config.hooks,
-                context={"tool": name, "args": arguments},
-                console=console,
-                timeout=config.hook_settings.timeout,
-            )
-
-        # Create confirm function bound to console
-        async def confirm_fn(prompt: str) -> bool:
-            return await prompt_user_confirm(console, prompt)
-
-        # Execute with safety checks
-        result = await execute_tool(
-            tool_call,
-            registry,
-            config.tools,
-            confirm_fn=confirm_fn,
-            session_approved=session_approved,
-        )
-
-        # Display result
-        display_tool_result(console, result)
-
-        # Fire post_tool_call hooks
-        if _run_hooks is not None:
-            await _run_hooks(
-                "post_tool_call",
-                config.hooks,
-                context={"tool": name, "result": str(result.output or result.error)},
-                console=console,
-                timeout=config.hook_settings.timeout,
-            )
-
-        # Fire on_file_write hooks for file_write/file_edit tools
-        if _run_hooks is not None and result.success and name in ("file_write", "file_edit"):
-            file_path = arguments.get("path", "")
-            if file_path:
+            # Fire pre_tool_call hooks
+            if _run_hooks is not None:
                 await _run_hooks(
-                    "on_file_write",
+                    "pre_tool_call",
                     config.hooks,
-                    context={"file_path": file_path},
+                    context={"tool": name, "args": arguments},
                     console=console,
                     timeout=config.hook_settings.timeout,
                 )
 
-        # Add tool result to conversation
-        conversation.add(
-            Message(
-                role=Role.TOOL,
-                content=result.output if result.success else (result.error or "Error"),
-                tool_call_id=tc_id,
-                name=name,
+            # Confirmation: auto-approve when requested, else prompt with an
+            # allow-for-session option that adds the tool to session_approved.
+            async def confirm_fn(prompt: str, _name: str = name) -> bool:
+                if auto_confirm:
+                    return True
+                decision = await prompt_user_confirm_decision(console, prompt)
+                if decision == "always":
+                    if session_approved is not None:
+                        session_approved.add(_name)
+                    return True
+                return decision == "once"
+
+            # Execute with safety checks
+            result = await execute_tool(
+                tool_call,
+                registry,
+                config.tools,
+                confirm_fn=confirm_fn,
+                session_approved=session_approved,
             )
-        )
+
+            # Display result
+            display_tool_result(console, result)
+
+            # Fire post_tool_call hooks
+            if _run_hooks is not None:
+                await _run_hooks(
+                    "post_tool_call",
+                    config.hooks,
+                    context={"tool": name, "result": str(result.output or result.error)},
+                    console=console,
+                    timeout=config.hook_settings.timeout,
+                )
+
+            # Fire on_file_write hooks for file_write/file_edit tools
+            if _run_hooks is not None and result.success and name in ("file_write", "file_edit"):
+                file_path = arguments.get("path", "")
+                if file_path:
+                    await _run_hooks(
+                        "on_file_write",
+                        config.hooks,
+                        context={"file_path": file_path},
+                        console=console,
+                        timeout=config.hook_settings.timeout,
+                    )
+
+            # Add tool result to conversation
+            conversation.add(
+                Message(
+                    role=Role.TOOL,
+                    content=result.output if result.success else (result.error or "Error"),
+                    tool_call_id=tc_id,
+                    name=name,
+                )
+            )
+            answered.add(tc_id)
+    finally:
+        # Backfill results for any tool calls left unanswered (e.g. interrupt).
+        for tc_raw in tool_calls_raw:
+            tc_id = tc_raw.get("id")
+            if not tc_id or tc_id in answered:
+                continue
+            func = tc_raw.get("function", {})
+            name = func.get("name", "") if isinstance(func, dict) else ""
+            conversation.add(
+                Message(
+                    role=Role.TOOL,
+                    content="Not executed (interrupted).",
+                    tool_call_id=tc_id,
+                    name=name,
+                )
+            )

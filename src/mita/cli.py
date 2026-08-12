@@ -684,6 +684,8 @@ def chat_command(
 
     conversation = Conversation()
     registry: ToolRegistry = ToolRegistry() if no_tools else create_default_registry()
+    # Tools the user approved "always" persist for the whole chat session.
+    session_approved: set[str] = set()
 
     async def _run_chat() -> None:
         nonlocal conversation
@@ -700,7 +702,12 @@ def chat_command(
             async def on_input(user_input: str) -> None:
                 nonlocal conversation
                 conversation = await run_agent(
-                    user_input, cfg, chat_console, conversation=conversation, registry=registry
+                    user_input,
+                    cfg,
+                    chat_console,
+                    conversation=conversation,
+                    registry=registry,
+                    session_approved=session_approved,
                 )
 
             def on_clear() -> None:
@@ -730,6 +737,14 @@ def ask_command(
     no_tools: Annotated[
         bool,
         typer.Option("--no-tools", help="Disable all tools."),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Approve destructive actions without prompting (non-interactive).",
+        ),
     ] = False,
 ) -> None:
     """Send a single prompt to the agent (non-interactive)."""
@@ -797,7 +812,9 @@ def ask_command(
             await plugin_mgr.register_tools(registry)
 
         try:
-            return await run_agent(full_prompt, cfg, ask_console, registry=registry)
+            return await run_agent(
+                full_prompt, cfg, ask_console, registry=registry, auto_confirm=yes
+            )
         finally:
             if plugin_mgr is not None:
                 await plugin_mgr.stop_all()

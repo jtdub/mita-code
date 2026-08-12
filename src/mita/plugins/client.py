@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from contextlib import AsyncExitStack
 from collections.abc import Callable
+from contextlib import AsyncExitStack
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+from mita.config.schema import PluginDefinition
 
 _mcp_default_env: Callable[[], dict[str, str]] | None
 try:
@@ -18,8 +20,6 @@ try:
     from mcp.client.stdio import get_default_environment as _mcp_default_env
 except ImportError:  # pragma: no cover - depends on mcp version
     _mcp_default_env = None
-
-from mita.config.schema import PluginDefinition
 
 _logger = logging.getLogger(__name__)
 
@@ -178,7 +178,15 @@ class MCPPluginClient:
                 parts.append(f"[binary data: {getattr(item, 'mimeType', 'unknown')}]")
             else:
                 parts.append(str(item))
-        return "\n".join(parts)
+        text = "\n".join(parts)
+
+        # Honor the MCP isError flag: a tool that failed must not be reported to the
+        # agent as a success. Raise so the handler produces a failed ToolResult.
+        # `is True` (not truthiness) — isError is a spec bool, and this stays correct
+        # when the result is a test MagicMock whose attributes auto-create as truthy.
+        if getattr(result, "isError", False) is True:
+            raise RuntimeError(text or f"MCP tool '{tool_name}' reported an error")
+        return text
 
     async def ping(self, timeout: float = 10.0) -> bool:
         """Ping the MCP server to check connectivity."""

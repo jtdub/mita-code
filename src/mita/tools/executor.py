@@ -8,12 +8,22 @@ from typing import Any
 
 from mita.config.schema import ToolSettings
 from mita.tools.registry import ToolRegistry
-from mita.tools.safety import is_command_banned, needs_confirmation
+from mita.tools.safety import (
+    CORE_BANNED_COMMANDS,
+    get_workspace_root,
+    is_command_banned,
+    needs_confirmation,
+)
 from mita.tools.schema import ToolCall, ToolResult
 
 _logger = logging.getLogger(__name__)
 
 ConfirmFn = Callable[[str], Coroutine[Any, Any, bool]]
+
+
+def _effective_banned(settings: ToolSettings) -> list[str]:
+    """Configured banned commands plus the un-removable core guards (finding S11)."""
+    return CORE_BANNED_COMMANDS + settings.banned_commands
 
 
 async def execute_tool(
@@ -42,9 +52,10 @@ async def execute_tool(
         )
 
     # Check for banned commands (shell and git tools)
+    banned = _effective_banned(settings)
     if tool_call.name == "shell":
         command = tool_call.arguments.get("command", "")
-        if is_command_banned(command, settings.banned_commands):
+        if is_command_banned(command, banned):
             return ToolResult(
                 tool_call_id=tool_call.id,
                 success=False,
@@ -52,7 +63,7 @@ async def execute_tool(
             )
     if tool_call.name == "git":
         subcommand = tool_call.arguments.get("subcommand", "")
-        if is_command_banned(f"git {subcommand}", settings.banned_commands):
+        if is_command_banned(f"git {subcommand}", banned):
             return ToolResult(
                 tool_call_id=tool_call.id,
                 success=False,
@@ -81,6 +92,11 @@ async def execute_tool(
         tool_call.arguments["_max_results"] = settings.glob_max_results
     elif tool_call.name == "grep":
         tool_call.arguments["_max_matches"] = settings.grep_max_matches
+    elif tool_call.name == "shell":
+        # Run inside the workspace root and cap the timeout at the configured
+        # shell_timeout (which was previously dead config).
+        tool_call.arguments["_cwd"] = str(get_workspace_root())
+        tool_call.arguments["_timeout_cap"] = settings.shell_timeout
 
     return await registry.execute(tool_call)
 

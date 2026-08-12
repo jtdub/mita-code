@@ -144,3 +144,22 @@ async def prompt_user_confirm(console: Console, question: str) -> bool:
     except (EOFError, KeyboardInterrupt):
         console.print()
         return False
+
+
+async def prompt_user_confirm_decision(console: Console, question: str) -> str:
+    """Ask the user to confirm a destructive action, with an allow-for-session option.
+
+    Returns one of "once", "always", or "deny". "always" means approve this and skip
+    confirmation for the same tool for the rest of the session.
+    """
+    console.print(f"[mita.warning]{escape(question)}[/mita.warning] ", end="")
+    try:
+        response = console.input("[y]es / [n]o / [a]lways ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        return "deny"
+    if response in ("a", "always"):
+        return "always"
+    if response in ("y", "yes"):
+        return "once"
+    return "deny"

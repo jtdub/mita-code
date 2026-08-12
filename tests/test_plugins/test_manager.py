@@ -169,8 +169,8 @@ class TestPluginManager:
         count = await mgr.register_tools(registry)
 
         assert count == 1
-        assert registry.has_tool("mcp:fs/read_file")
-        defn = registry.get_definition("mcp:fs/read_file")
+        assert registry.has_tool("mcp_fs_read_file")
+        defn = registry.get_definition("mcp_fs_read_file")
         assert defn is not None
         assert defn.source == "mcp:fs"
         assert len(defn.parameters) == 1
@@ -262,7 +262,7 @@ class TestPluginManager:
         from mita.tools.schema import ToolCall
 
         result = await registry.execute(
-            ToolCall(id="tc1", name="mcp:greeter/greet", arguments={"name": "World"})
+            ToolCall(id="tc1", name="mcp_greeter_greet", arguments={"name": "World"})
         )
         assert result.success is True
         assert result.output == "Hello, World!"
@@ -296,7 +296,7 @@ class TestMCPToolConfirmation:
         registry = ToolRegistry()
         await mgr.register_tools(registry)
 
-        definition = registry.get_definition("mcp:srv/do_thing")
+        definition = registry.get_definition("mcp_srv_do_thing")
         assert definition is not None
         assert definition.destructive is True
 
@@ -307,7 +307,7 @@ class TestMCPToolConfirmation:
             return False
 
         result = await execute_tool(
-            ToolCall(id="1", name="mcp:srv/do_thing", arguments={}),
+            ToolCall(id="1", name="mcp_srv_do_thing", arguments={}),
             registry,
             ToolSettings(),
             confirm_fn=confirm,
@@ -327,16 +327,34 @@ class TestMCPToolConfirmation:
         registry = ToolRegistry()
         await mgr.register_tools(registry)
 
-        definition = registry.get_definition("mcp:srv/do_thing")
+        definition = registry.get_definition("mcp_srv_do_thing")
         assert definition is not None
         assert definition.destructive is False
 
         # No confirm_fn: a read-only tool must still run (not be auto-denied).
         result = await execute_tool(
-            ToolCall(id="1", name="mcp:srv/do_thing", arguments={}),
+            ToolCall(id="1", name="mcp_srv_do_thing", arguments={}),
             registry,
             ToolSettings(),
             confirm_fn=None,
         )
         assert result.success is True
         assert result.output == "done"
+
+
+class TestMcpToolName:
+    """Audit finding: mcp: tool names must be OpenAI-function-name safe."""
+
+    def test_sanitizes_colon_and_slash(self) -> None:
+        from mita.plugins.manager import mcp_tool_name
+
+        name = mcp_tool_name("my-server", "read/file")
+        assert name == "mcp_my-server_read_file"
+        assert all(c.isalnum() or c in "_-" for c in name)
+
+    def test_truncates_and_hashes_long_names(self) -> None:
+        from mita.plugins.manager import mcp_tool_name
+
+        name = mcp_tool_name("p" * 50, "t" * 50)
+        assert len(name) <= 64
+        assert all(c.isalnum() or c in "_-" for c in name)
