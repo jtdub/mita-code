@@ -20,6 +20,19 @@ class ConfigError(Exception):
     """
 
 
+def _dedup_preserve_order(items: list[Any]) -> list[Any]:
+    """Return items with duplicates removed, preserving first-seen order.
+
+    Handles unhashable entries (dicts, as in hooks/plugins) via equality, so an
+    identical hook declared in both global and project config is not run twice (S10).
+    """
+    result: list[Any] = []
+    for item in items:
+        if item not in result:
+            result.append(item)
+    return result
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Deep merge override into base. Lists are appended, dicts are merged recursively."""
     result = base.copy()
@@ -27,7 +40,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
         elif key in result and isinstance(result[key], list) and isinstance(value, list):
-            result[key] = result[key] + value
+            result[key] = _dedup_preserve_order(result[key] + value)
         else:
             result[key] = value
     return result

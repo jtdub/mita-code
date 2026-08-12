@@ -124,3 +124,20 @@ class TestConfigErrors:
 
         with pytest.raises(ConfigError, match="Invalid configuration"):
             load_config()
+
+
+class TestListDedup:
+    """Audit finding S10: appended lists are de-duplicated so hooks don't run twice."""
+
+    def test_duplicate_scalars_deduped(self) -> None:
+        from mita.config.loader import _deep_merge
+
+        result = _deep_merge({"items": [1, 2]}, {"items": [2, 3]})
+        assert result["items"] == [1, 2, 3]
+
+    def test_duplicate_dicts_deduped(self) -> None:
+        from mita.config.loader import _deep_merge
+
+        hook = {"event": "session_start", "command": "echo hi"}
+        result = _deep_merge({"hooks": [hook]}, {"hooks": [dict(hook)]})
+        assert result["hooks"] == [hook]

@@ -86,3 +86,25 @@ class TestDiscoverMemoryFiles:
         # Both should appear, no duplicates
         assert root_mem in result
         assert dotmita_mem in result
+
+
+class TestHomeBoundary:
+    """Audit finding S9: the walk-up must not go above the home directory."""
+
+    def test_walk_stops_at_home(self) -> None:
+        from pathlib import Path
+
+        from mita.memory.discovery import discover_memory_files
+
+        home = Path.home()
+        (home / "MITA.md").write_text("home mem\n")
+        above = home.parent
+        (above / "MITA.md").write_text("above mem\n")
+        sub = home / "proj"
+        sub.mkdir()
+        (sub / "MITA.md").write_text("proj mem\n")
+
+        files = discover_memory_files(sub)
+        assert (sub / "MITA.md") in files
+        assert (home / "MITA.md") in files
+        assert (above / "MITA.md") not in files

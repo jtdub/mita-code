@@ -42,8 +42,14 @@ def discover_memory_files(cwd: Path | None = None) -> list[Path]:
         if dotmita_candidate.is_file() and dotmita_candidate not in found:
             found.append(dotmita_candidate)
 
-        # Stop at project root (contains .git or .mita)
-        if (current / ".git").exists() or (current / PROJECT_CONFIG_DIR).exists():
+        # Stop at project root (contains .git or .mita), or at the home directory.
+        # Without the home boundary, running mita from a non-repo directory walked
+        # all the way to '/', reading ~/MITA.md and even /MITA.md (finding S9).
+        if (
+            (current / ".git").exists()
+            or (current / PROJECT_CONFIG_DIR).exists()
+            or current == Path.home()
+        ):
             break
 
         parent = current.parent
