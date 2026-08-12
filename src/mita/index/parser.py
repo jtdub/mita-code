@@ -150,13 +150,31 @@ def parse_file(file_path: Path, root: Path, config: IndexSettings) -> list[CodeC
     rel_path = str(file_path.relative_to(root))
     language = get_language_for_file(file_path)
 
+    chunks: list[CodeChunk] = []
     if language and language in CHUNK_NODE_TYPES:
         chunks = _parse_with_treesitter(content, rel_path, language, config)
-        if chunks:
-            return chunks
+    if not chunks:
+        # Fallback: line-based chunking (no grammar, or grammar produced nothing).
+        chunks = _chunk_by_lines(content, rel_path, language or "text", config)
 
-    # Fallback: line-based chunking
-    return _chunk_by_lines(content, rel_path, language or "text", config)
+    return _assign_ids(chunks, rel_path)
+
+
+def _assign_ids(chunks: list[CodeChunk], rel_path: str) -> list[CodeChunk]:
+    """Assign a stable chunk_id per chunk.
+
+    Identity is ``sha1(file_path | symbol_path | occurrence_ordinal)`` — it deliberately
+    excludes line numbers so a chunk that only shifts keeps its id (finding C6/B1). The
+    ordinal disambiguates gap chunks (empty symbol_path) and repeated symbols in a file.
+    """
+    seen: dict[str, int] = {}
+    for chunk in chunks:
+        key = chunk.symbol_path
+        ordinal = seen.get(key, 0)
+        seen[key] = ordinal + 1
+        chunk.occurrence_ordinal = ordinal
+        chunk.chunk_id = hashlib.sha1(f"{rel_path}|{key}|{ordinal}".encode()).hexdigest()
+    return chunks
 
 
 def get_language_for_file(path: Path) -> str | None:

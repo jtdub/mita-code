@@ -12,19 +12,61 @@ from mita.index.manager import build_index, clear_index, search_index, show_inde
 
 class TestBuildIndex:
     @pytest.mark.asyncio()
-    async def test_already_exists_no_force(self) -> None:
+    async def test_incremental_only_embeds_changed(self, tmp_path: Path) -> None:
+        """Audit finding C6: an incremental build re-embeds only new/changed chunks."""
+        from mita.config.schema import MitaConfig
+        from mita.index.store import CodeChunk
+
+        config = MitaConfig()
+        c1 = CodeChunk(
+            file_path="a.py",
+            start_line=1,
+            end_line=2,
+            content="def a(): pass",
+            language="python",
+            chunk_id="id1",
+            content_hash="h1",
+        )
+        c2 = CodeChunk(
+            file_path="a.py",
+            start_line=3,
+            end_line=4,
+            content="def b(): pass",
+            language="python",
+            chunk_id="id2",
+            content_hash="h2-new",
+        )
+
         with (
-            patch("mita.index.manager.load_config"),
-            patch("mita.index.get_index_dir", return_value=Path("/tmp/index")),
+            patch("mita.index.manager.load_config", return_value=config),
+            patch("mita.index.get_index_dir", return_value=tmp_path / "index"),
             patch("mita.index.manager.IndexStore") as mock_store_cls,
-            patch("mita.index.manager.console") as mock_console,
+            patch("mita.index.manager.EmbeddingClient") as mock_emb_cls,
+            patch("mita.index.manager.parse_codebase", return_value=[c1, c2]),
+            patch("mita.index.manager.console"),
         ):
             mock_store = MagicMock()
             mock_store.exists.return_value = True
+            mock_store.needs_full_rebuild.return_value = False
+            # c1 unchanged (h1 matches), c2 changed (stored hash differs).
+            mock_store.load_content_hashes = AsyncMock(return_value={"id1": "h1", "id2": "h2-old"})
+            mock_store.apply_incremental = AsyncMock()
             mock_store_cls.return_value = mock_store
 
+            mock_emb = AsyncMock()
+            mock_emb.is_model_available = AsyncMock(return_value=True)
+            mock_emb.embed_texts = AsyncMock(return_value=[[0.1, 0.2]])
+            mock_emb_cls.return_value = mock_emb
+
             await build_index(force=False)
-            assert "already exists" in str(mock_console.print.call_args)
+
+            # Only the changed chunk (c2) is embedded.
+            mock_emb.embed_texts.assert_awaited_once()
+            assert mock_emb.embed_texts.call_args.args[0] == ["def b(): pass"]
+            mock_store.apply_incremental.assert_awaited_once()
+            # present_ids passed to apply_incremental covers BOTH current chunks.
+            present_ids = mock_store.apply_incremental.call_args.args[1]
+            assert present_ids == {"id1", "id2"}
 
     @pytest.mark.asyncio()
     async def test_model_not_available_no_callback(self) -> None:

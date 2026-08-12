@@ -135,3 +135,57 @@ class TestIndexStore:
         )
         stats2 = await store.status()
         assert stats2["chunks"] == 2
+
+
+class TestIncremental:
+    """Audit finding C6: incremental upsert/delete + content-hash tracking."""
+
+    def _chunk(self, cid: str, chash: str, text: str) -> CodeChunk:
+        from mita.index.store import CodeChunk
+
+        return CodeChunk(
+            file_path="a.py",
+            start_line=1,
+            end_line=1,
+            content=text,
+            language="python",
+            chunk_id=cid,
+            content_hash=chash,
+            embedding=[0.1, 0.2, 0.3],
+        )
+
+    @pytest.mark.asyncio()
+    async def test_load_content_hashes(self, tmp_path: Path) -> None:
+        from mita.index.store import IndexStore
+
+        store = IndexStore(tmp_path)
+        await store.create_or_replace(
+            [self._chunk("id1", "h1", "a"), self._chunk("id2", "h2", "b")], "nomic", 1.0
+        )
+        hashes = await store.load_content_hashes()
+        assert hashes == {"id1": "h1", "id2": "h2"}
+
+    @pytest.mark.asyncio()
+    async def test_apply_incremental_upserts_and_deletes(self, tmp_path: Path) -> None:
+        from mita.index.store import IndexStore
+
+        store = IndexStore(tmp_path)
+        await store.create_or_replace(
+            [self._chunk("id1", "h1", "a"), self._chunk("id2", "h2", "b")], "nomic", 1.0
+        )
+
+        # id1 removed (not in present_ids); id2 updated; id3 added.
+        changed = [self._chunk("id2", "h2b", "b2"), self._chunk("id3", "h3", "c")]
+        await store.apply_incremental(changed, {"id2", "id3"}, "nomic", 2.0)
+
+        hashes = await store.load_content_hashes()
+        assert hashes == {"id2": "h2b", "id3": "h3"}
+
+    @pytest.mark.asyncio()
+    async def test_needs_full_rebuild_on_model_change(self, tmp_path: Path) -> None:
+        from mita.index.store import IndexStore
+
+        store = IndexStore(tmp_path)
+        await store.create_or_replace([self._chunk("id1", "h1", "a")], "nomic-embed-text", 1.0)
+        assert store.needs_full_rebuild("nomic-embed-text") is False
+        assert store.needs_full_rebuild("bge-small") is True

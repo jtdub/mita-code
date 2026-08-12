@@ -33,11 +33,6 @@ async def build_index(force: bool = False, pull_model_fn: object | None = None) 
     index_dir = get_index_dir()
     store = IndexStore(index_dir)
 
-    # Check if index already exists
-    if store.exists() and not force:
-        console.print("[yellow]Index already exists. Use --force to rebuild.[/yellow]")
-        return
-
     # Check embedding model availability
     embedder = EmbeddingClient(config)
     if not await embedder.is_model_available():
@@ -49,6 +44,10 @@ async def build_index(force: bool = False, pull_model_fn: object | None = None) 
             return
 
     start_time = time.monotonic()
+    built_at = time.time()  # wall-clock stamp for the index metadata
+
+    # A changed embedding model (or index version) requires a full rebuild.
+    full_rebuild = force or store.needs_full_rebuild(config.model.embedding)
 
     # Parse codebase
     root = Path.cwd()
@@ -64,10 +63,53 @@ async def build_index(force: bool = False, pull_model_fn: object | None = None) 
         console.print("[yellow]No code chunks found to index.[/yellow]")
         return
 
-    console.print(f"Found {len(chunks)} chunks from codebase.")
+    # Incremental: only embed new/changed chunks (by content_hash).
+    if full_rebuild:
+        to_embed = chunks
+    else:
+        existing = await store.load_content_hashes()
+        to_embed = [c for c in chunks if existing.get(c.chunk_id) != c.content_hash]
+        console.print(
+            f"Found {len(chunks)} chunks; {len(to_embed)} new/changed to embed "
+            f"({len(chunks) - len(to_embed)} unchanged)."
+        )
 
-    # Generate embeddings
-    texts = [c.content for c in chunks]
+    if full_rebuild:
+        console.print(f"Found {len(chunks)} chunks from codebase (full rebuild).")
+
+    embeddings = await _embed_chunks(embedder, [c.content for c in to_embed])
+    if embeddings is None:
+        return
+    if len(embeddings) != len(to_embed):
+        console.print("[red]Embedding count mismatch. Index build aborted.[/red]")
+        return
+    for chunk, embedding in zip(to_embed, embeddings, strict=False):
+        chunk.embedding = embedding
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task("Writing index...", total=None)
+        if full_rebuild:
+            await store.create_or_replace(chunks, config.model.embedding, built_at)
+        else:
+            present_ids = {c.chunk_id for c in chunks}
+            await store.apply_incremental(to_embed, present_ids, config.model.embedding, built_at)
+
+    elapsed = time.monotonic() - start_time
+    file_count = len({c.file_path for c in chunks})
+    console.print(
+        f"[green]Indexed {len(chunks)} chunks from {file_count} files in {elapsed:.1f}s "
+        f"({len(to_embed)} embedded).[/green]"
+    )
+
+
+async def _embed_chunks(embedder: EmbeddingClient, texts: list[str]) -> list[list[float]] | None:
+    """Embed texts with progress; return None on failure."""
+    if not texts:
+        return []
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -81,40 +123,13 @@ async def build_index(force: bool = False, pull_model_fn: object | None = None) 
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
             try:
-                batch_embeddings = await embedder.embed_texts(batch)
+                embeddings.extend(await embedder.embed_texts(batch))
             except (ConnectionError, TimeoutError, OSError) as e:
                 console.print(f"\n[red]Embedding failed at batch {i // batch_size + 1}: {e}[/red]")
                 console.print("[red]Index build aborted to prevent data corruption.[/red]")
-                return
-            embeddings.extend(batch_embeddings)
+                return None
             progress.update(task, completed=min(i + batch_size, len(texts)))
-
-    # Verify alignment before attaching
-    if len(embeddings) != len(chunks):
-        console.print(
-            f"[red]Embedding count mismatch ({len(embeddings)} vs {len(chunks)} chunks). "
-            "Index build aborted.[/red]"
-        )
-        return
-
-    # Attach embeddings to chunks
-    for chunk, embedding in zip(chunks, embeddings):
-        chunk.embedding = embedding
-
-    # Store in LanceDB
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        progress.add_task("Writing index...", total=None)
-        await store.create_or_replace(chunks)
-
-    elapsed = time.monotonic() - start_time
-    file_count = len({c.file_path for c in chunks})
-    console.print(
-        f"[green]Indexed {len(chunks)} chunks from {file_count} files in {elapsed:.1f}s.[/green]"
-    )
+    return embeddings
 
 
 async def show_index_status() -> None:
@@ -133,7 +148,14 @@ async def show_index_status() -> None:
     table.add_row("Chunks", str(stats["chunks"]))
     table.add_row("Files", str(stats["files"]))
     table.add_row("Location", str(get_index_dir()))
-    table.add_row("Embedding model", config.model.embedding)
+    # Report the model the index was actually built with, not just the current config.
+    table.add_row("Embedding model", stats.get("embed_model") or config.model.embedding)
+    built_at = stats.get("built_at") or 0.0
+    if built_at:
+        import datetime
+
+        when = datetime.datetime.fromtimestamp(built_at).strftime("%Y-%m-%d %H:%M:%S")
+        table.add_row("Last built", when)
     console.print(table)
 
 
