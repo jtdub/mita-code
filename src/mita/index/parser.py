@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from fnmatch import fnmatch
 from pathlib import Path
@@ -12,6 +13,12 @@ from mita.index.store import CodeChunk
 
 # Rough estimate: ~4 characters per token for budget calculations
 CHARS_PER_TOKEN = 4
+
+
+def content_hash(text: str) -> str:
+    """Stable hash of chunk content, for incremental re-embedding (finding C6)."""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
 
 # Extension → tree-sitter language name
 EXTENSION_MAP: dict[str, str] = {
@@ -75,8 +82,39 @@ CHUNK_NODE_TYPES: dict[str, set[str]] = {
     "java": {"class_declaration", "method_declaration", "interface_declaration"},
     "c": {"function_definition", "struct_specifier"},
     "cpp": {"function_definition", "class_specifier", "struct_specifier"},
-    "ruby": {"method", "class", "module"},
+    "ruby": {"method", "class", "module", "singleton_method"},
+    "php": {"function_definition", "class_declaration", "method_declaration"},
+    "swift": {"function_declaration", "class_declaration", "protocol_declaration"},
+    "kotlin": {"function_declaration", "class_declaration", "object_declaration"},
+    "scala": {"function_definition", "class_definition", "object_definition", "trait_definition"},
+    "lua": {"function_declaration", "function_definition"},
+    "bash": {"function_definition"},
 }
+
+# Coarse classification of a definition node type for the chunk_type column.
+_CLASS_LIKE = (
+    "class",
+    "struct",
+    "impl",
+    "interface",
+    "trait",
+    "enum",
+    "module",
+    "object",
+    "protocol",
+    "type",
+)
+_FUNC_LIKE = ("function", "method", "func")
+
+
+def _classify(node_type: str) -> str:
+    """Map a tree-sitter node type to a coarse chunk_type."""
+    lowered = node_type.lower()
+    if any(tok in lowered for tok in _CLASS_LIKE):
+        return "class"
+    if any(tok in lowered for tok in _FUNC_LIKE):
+        return "function"
+    return "definition"
 
 
 def parse_codebase(root: Path, config: IndexSettings) -> list[CodeChunk]:
@@ -191,53 +229,162 @@ def _parse_with_treesitter(
     tree = parser.parse(content.encode("utf-8"))
     node_types = CHUNK_NODE_TYPES.get(language, set())
     lines = content.split("\n")
+    char_budget = config.chunk_size * CHARS_PER_TOKEN
     chunks: list[CodeChunk] = []
+    covered: list[tuple[int, int]] = []  # 1-indexed inclusive line ranges
 
-    for node in _walk_top_level(tree.root_node):
-        if node.type not in node_types:
-            continue
-
-        start_line = node.start_point[0] + 1  # 1-indexed
+    for node in _collect_definitions(tree.root_node, node_types):
+        start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
+        covered.append((start_line, end_line))
         node_content = "\n".join(lines[start_line - 1 : end_line])
-        symbol = _extract_symbol(node, language)
+        symbol = _extract_symbol(node)
+        ctype = _classify(node.type)
 
-        # Split large nodes
-        char_budget = config.chunk_size * CHARS_PER_TOKEN  # ~4 chars per token
         if len(node_content) > char_budget:
-            sub_chunks = _split_large_content(
-                node_content, start_line, rel_path, language, symbol, config
-            )
-            chunks.extend(sub_chunks)
-        else:
-            chunks.append(
-                CodeChunk(
-                    file_path=rel_path,
-                    start_line=start_line,
-                    end_line=end_line,
-                    content=node_content,
-                    language=language,
-                    symbol=symbol,
+            chunks.extend(
+                _split_large_content(
+                    node_content, start_line, rel_path, language, symbol, ctype, config
                 )
             )
+        else:
+            chunks.append(
+                _make_chunk(rel_path, start_line, end_line, node_content, language, symbol, ctype)
+            )
 
+    # Capture content NOT covered by any definition (imports, module constants, top-level
+    # config tables) so it is indexed rather than silently dropped (finding C6).
+    chunks.extend(_capture_gaps(lines, covered, rel_path, language, config))
+    chunks.sort(key=lambda c: (c.start_line, c.end_line))
     return chunks
 
 
-def _walk_top_level(node: Any) -> list[Any]:
-    """Get top-level children of the root node (non-recursive)."""
-    children = getattr(node, "children", [])
-    return list(children)
+def _make_chunk(
+    rel_path: str,
+    start_line: int,
+    end_line: int,
+    text: str,
+    language: str,
+    symbol: str | None,
+    chunk_type: str,
+) -> CodeChunk:
+    return CodeChunk(
+        file_path=rel_path,
+        start_line=start_line,
+        end_line=end_line,
+        content=text,
+        language=language,
+        symbol=symbol,
+        symbol_path=symbol or "",
+        chunk_type=chunk_type,
+        content_hash=content_hash(text),
+    )
 
 
-def _extract_symbol(node: Any, language: str) -> str | None:
-    """Extract the name of a function/class node."""
-    # Most languages store the name in a child node of type "identifier" or "name"
+def _collect_definitions(root: Any, node_types: set[str]) -> list[Any]:
+    """Collect the OUTERMOST definition nodes anywhere in the tree.
+
+    Descends through non-definition wrappers (export_statement, if/try blocks) so a
+    top-level def nested inside a block is still found, but does NOT recurse into a
+    captured definition — a class's methods stay part of the class chunk (no overlap).
+    """
+    result: list[Any] = []
+
+    def visit(node: Any) -> None:
+        for child in getattr(node, "children", []):
+            if child.type in node_types:
+                result.append(child)
+            else:
+                visit(child)
+
+    visit(root)
+    return result
+
+
+def _extract_symbol(node: Any) -> str | None:
+    """Extract the name of a definition node using the tree-sitter field API."""
+    name = _name_of(node)
+    if name:
+        return name
+    # Wrappers (decorated_definition, export_statement) hold the real def as a child.
     for child in getattr(node, "children", []):
-        child_type = getattr(child, "type", "")
-        if child_type in ("identifier", "name", "property_identifier"):
-            return getattr(child, "text", b"").decode("utf-8", errors="replace")
+        name = _name_of(child)
+        if name:
+            return name
     return None
+
+
+def _name_of(node: Any) -> str | None:
+    """Resolve a node's name via the `name` field, or the `declarator` chain for C/C++."""
+    name_node = _field(node, "name")
+    if name_node is not None:
+        return str(name_node.text.decode("utf-8", errors="replace"))
+
+    decl = _field(node, "declarator")
+    for _ in range(8):  # bounded declarator recursion
+        if decl is None:
+            break
+        if decl.type in ("identifier", "field_identifier", "type_identifier"):
+            return str(decl.text.decode("utf-8", errors="replace"))
+        nxt = _field(decl, "declarator")
+        if nxt is None:
+            for ch in getattr(decl, "children", []):
+                if ch.type in ("identifier", "field_identifier", "type_identifier"):
+                    return str(ch.text.decode("utf-8", errors="replace"))
+            break
+        decl = nxt
+    return None
+
+
+def _field(node: Any, field: str) -> Any:
+    """child_by_field_name that tolerates nodes/grammars without the field."""
+    try:
+        return node.child_by_field_name(field)
+    except (AttributeError, TypeError):
+        return None
+
+
+def _capture_gaps(
+    lines: list[str],
+    covered: list[tuple[int, int]],
+    rel_path: str,
+    language: str,
+    config: IndexSettings,
+) -> list[CodeChunk]:
+    """Chunk contiguous line ranges not covered by any definition chunk."""
+    covered_lines: set[int] = set()
+    for start, end in covered:
+        covered_lines.update(range(start, end + 1))
+
+    char_budget = config.chunk_size * CHARS_PER_TOKEN
+    overlap_chars = config.chunk_overlap * CHARS_PER_TOKEN
+    chunks: list[CodeChunk] = []
+
+    def flush(gap_start: int, gap_end: int) -> None:
+        gap_lines = lines[gap_start - 1 : gap_end]
+        if not "\n".join(gap_lines).strip():
+            return
+        for ws, we in _compute_line_windows(gap_lines, char_budget, overlap_chars):
+            seg = "\n".join(gap_lines[ws:we])
+            if seg.strip():
+                chunks.append(
+                    _make_chunk(
+                        rel_path, gap_start + ws, gap_start + we - 1, seg, language, None, "module"
+                    )
+                )
+
+    run_start: int | None = None
+    for ln in range(1, len(lines) + 1):
+        if ln not in covered_lines:
+            if run_start is None:
+                run_start = ln
+        elif run_start is not None:
+            flush(run_start, ln - 1)
+            run_start = None
+    if run_start is not None:
+        flush(run_start, len(lines))
+
+    return chunks
 
 
 def _compute_line_windows(
@@ -285,6 +432,7 @@ def _split_large_content(
     rel_path: str,
     language: str,
     symbol: str | None,
+    chunk_type: str,
     config: IndexSettings,
 ) -> list[CodeChunk]:
     """Split a large chunk into overlapping sub-chunks."""
@@ -296,13 +444,14 @@ def _split_large_content(
     for start, end in _compute_line_windows(lines, char_budget, overlap_chars):
         chunk_content = "\n".join(lines[start:end])
         chunks.append(
-            CodeChunk(
-                file_path=rel_path,
-                start_line=base_start_line + start,
-                end_line=base_start_line + end - 1,
-                content=chunk_content,
-                language=language,
-                symbol=symbol,
+            _make_chunk(
+                rel_path,
+                base_start_line + start,
+                base_start_line + end - 1,
+                chunk_content,
+                language,
+                symbol,
+                chunk_type,
             )
         )
 
@@ -315,7 +464,7 @@ def _chunk_by_lines(
     language: str,
     config: IndexSettings,
 ) -> list[CodeChunk]:
-    """Fallback: chunk file by line windows."""
+    """Fallback: chunk file by line windows (files with no tree-sitter grammar)."""
     lines = content.split("\n")
     char_budget = config.chunk_size * CHARS_PER_TOKEN
     overlap_chars = config.chunk_overlap * CHARS_PER_TOKEN
@@ -325,13 +474,7 @@ def _chunk_by_lines(
         chunk_content = "\n".join(lines[start:end])
         if chunk_content.strip():
             chunks.append(
-                CodeChunk(
-                    file_path=rel_path,
-                    start_line=start + 1,
-                    end_line=end,
-                    content=chunk_content,
-                    language=language,
-                )
+                _make_chunk(rel_path, start + 1, end, chunk_content, language, None, "module")
             )
 
     return chunks

@@ -21,6 +21,12 @@ class CodeChunk(BaseModel):
     content: str
     language: str
     symbol: str | None = None
+    # Schema-forward metadata (finding C6). symbol_path uses the shared-schema naming so
+    # a Mita index stays export-compatible with Hearth AI; content_hash drives incremental
+    # re-embedding; chunk_type enables filtered search.
+    symbol_path: str = ""
+    chunk_type: str = ""
+    content_hash: str = ""
     embedding: list[float] | None = Field(default=None, exclude=True)
 
 
