@@ -6,8 +6,18 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from mita.config.defaults import get_global_config_path, get_project_config_path
 from mita.config.schema import MitaConfig
+
+
+class ConfigError(Exception):
+    """Raised when a config file is malformed or fails validation.
+
+    Carries a human-readable message so the CLI can show a clear error instead of
+    a raw traceback (which previously bricked every command, including doctor).
+    """
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -25,8 +35,13 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 def _load_toml(path: Path) -> dict[str, Any]:
     """Load a TOML file and return its contents as a dict."""
-    with open(path, "rb") as f:
-        return tomllib.load(f)
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"Malformed TOML in {path}: {e}") from e
+    except OSError as e:
+        raise ConfigError(f"Could not read config file {path}: {e}") from e
 
 
 def load_config(
@@ -65,4 +80,7 @@ def load_config(
             project_data, _ = filter_untrusted(project_data)
         merged = _deep_merge(merged, project_data)
 
-    return MitaConfig.model_validate(merged)
+    try:
+        return MitaConfig.model_validate(merged)
+    except ValidationError as e:
+        raise ConfigError(f"Invalid configuration: {e}") from e

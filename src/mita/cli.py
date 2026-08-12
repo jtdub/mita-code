@@ -7,7 +7,7 @@ import logging
 import shlex
 import sys
 from io import StringIO
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
@@ -31,9 +31,25 @@ from mita.models.manager import (
     show_recommendations,
 )
 
+if TYPE_CHECKING:
+    from mita.config.schema import MitaConfig
+
 _logger = logging.getLogger(__name__)
 
 console = Console()
+
+
+def _safe_load_config() -> MitaConfig:
+    """Load config, converting a ConfigError into a clean CLI error + exit."""
+    from mita.config.loader import ConfigError
+    from mita.config.loader import load_config as _load_config
+
+    try:
+        return _load_config()
+    except ConfigError as e:
+        console.print(f"[red]Configuration error:[/red] {e}")
+        raise typer.Exit(1) from e
+
 
 app = typer.Typer(
     name="mita",
@@ -650,7 +666,6 @@ def chat_command(
 
     from mita.agent.conversation import Conversation
     from mita.agent.loop import run_agent
-    from mita.config.loader import load_config as _load_config
     from mita.config.schema import PermissionMode
     from mita.models.server import ensure_model, ensure_server
     from mita.tools.registry import ToolRegistry, create_default_registry
@@ -658,7 +673,7 @@ def chat_command(
     from mita.ui.repl import repl_loop
 
     _ensure_project_trust(interactive=True)
-    cfg = _load_config()
+    cfg = _safe_load_config()
 
     if permission is not None:
         try:
@@ -753,7 +768,6 @@ def ask_command(
 
     from mita.agent.conversation import Conversation, Role
     from mita.agent.loop import run_agent
-    from mita.config.loader import load_config as _load_config
     from mita.models.server import ensure_model, ensure_server
     from mita.tools.registry import ToolRegistry, create_default_registry
     from mita.ui.display import get_console
@@ -778,7 +792,7 @@ def ask_command(
         effective_output = OutputFormat.TEXT if not sys.stdout.isatty() else OutputFormat.RICH
 
     _ensure_project_trust(interactive=False)
-    cfg = _load_config()
+    cfg = _safe_load_config()
 
     # Build the console for this run
     if effective_output == OutputFormat.TEXT:
@@ -878,7 +892,7 @@ def doctor_command() -> None:
     # 3. Ollama server running
     from mita.models.server import is_server_running
 
-    cfg = load_config()
+    cfg = _safe_load_config()
     if is_server_running(cfg.ollama.host):
         doc_console.print("  [green]\u2713[/green] Ollama server running")
     else:

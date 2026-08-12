@@ -92,3 +92,35 @@ class TestLoadConfig:
         cfg = load_config(project_root=tmp_project)
         assert "~/.config/mita/skills" in cfg.skills_paths
         assert ".mita/skills" in cfg.skills_paths
+
+
+class TestConfigErrors:
+    """Audit finding S1: a malformed config raises a clean ConfigError, not a traceback."""
+
+    def test_malformed_toml_raises_config_error(self) -> None:
+        from pathlib import Path
+
+        import pytest
+
+        from mita.config.loader import ConfigError, load_config
+
+        global_dir = Path.home() / ".config" / "mita"
+        global_dir.mkdir(parents=True)
+        (global_dir / "config.toml").write_text("this is = not valid toml [[[\n")
+
+        with pytest.raises(ConfigError, match="Malformed TOML"):
+            load_config()
+
+    def test_invalid_value_raises_config_error(self) -> None:
+        from pathlib import Path
+
+        import pytest
+
+        from mita.config.loader import ConfigError, load_config
+
+        global_dir = Path.home() / ".config" / "mita"
+        global_dir.mkdir(parents=True)
+        (global_dir / "config.toml").write_text('[model]\ntemperature = "hot"\n')
+
+        with pytest.raises(ConfigError, match="Invalid configuration"):
+            load_config()
