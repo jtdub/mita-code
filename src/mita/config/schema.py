@@ -3,8 +3,55 @@
 from __future__ import annotations
 
 import enum
+import os
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class LLMProvider(enum.StrEnum):
+    """Local inference backend that serves the chat/embeddings API.
+
+    All except ``ollama`` are OpenAI-compatible HTTP servers. ``ollama`` keeps its
+    native API (and daemon management via the ``[ollama]`` section).
+    """
+
+    OLLAMA = "ollama"
+    LLAMACPP = "llamacpp"
+    VLLM = "vllm"
+    LMSTUDIO = "lmstudio"
+    TGI = "tgi"
+    OPENAI_COMPATIBLE = "openai_compatible"
+
+
+class LLMSettings(BaseModel):
+    """Backend selection for chat and embeddings (audit finding C5).
+
+    Backward compatible: with no ``[llm]`` section the provider defaults to Ollama and
+    the existing ``[ollama] host`` is used as the base URL.
+    """
+
+    provider: LLMProvider = LLMProvider.OLLAMA
+    base_url: str = ""  # empty → provider default (Ollama uses [ollama] host)
+    api_key: str = ""  # empty → placeholder for openai-routed providers
+    context_probe: str = "auto"  # auto | off | <int>
+
+    @field_validator("api_key", "base_url")
+    @classmethod
+    def _expand_env(cls, v: str) -> str:
+        """Expand ${VAR}/$VAR from the environment so secrets aren't stored in TOML."""
+        return os.path.expandvars(v)
+
+    @field_validator("context_probe")
+    @classmethod
+    def _valid_probe(cls, v: str) -> str:
+        if v in ("auto", "off"):
+            return v
+        try:
+            if int(v) > 0:
+                return v
+        except ValueError:
+            pass
+        raise ValueError('context_probe must be "auto", "off", or a positive integer')
 
 
 class PermissionMode(enum.StrEnum):
@@ -234,6 +281,7 @@ class UISettings(BaseModel):
 class MitaConfig(BaseModel):
     """Root configuration model — result of merging global + project TOML."""
 
+    llm: LLMSettings = Field(default_factory=LLMSettings)
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     model: ModelSettings = Field(default_factory=ModelSettings)
     tools: ToolSettings = Field(default_factory=ToolSettings)

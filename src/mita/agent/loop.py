@@ -101,7 +101,9 @@ async def run_agent(
                             content=f"{_RAG_CONTEXT_PREFIX}\n{rag_context}",
                         )
                     )
-        except (ConnectionError, FileNotFoundError, ImportError, OSError):
+        except Exception:  # noqa: BLE001 - RAG is optional; never let it abort the turn
+            # Broad by design: embedding backends raise provider-specific errors
+            # (ollama.ResponseError, httpx.HTTPError, ...) that must degrade, not crash.
             _logger.warning("RAG index unavailable, proceeding without it", exc_info=True)
 
     # Fire session_start hooks
@@ -115,6 +117,11 @@ async def run_agent(
             timeout=config.hook_settings.timeout,
         )
 
+    # Resolve the effective context window (probe the backend, else the config value).
+    from mita.llm.context import resolve_context_window
+
+    context_window = await resolve_context_window(config)
+
     # Agent loop
     last_tool_signature: str | None = None
     repeat_count = 0
@@ -124,7 +131,7 @@ async def run_agent(
     for _iteration in range(max_iterations):
         try:
             # Truncate to fit context window
-            conversation.truncate_to_fit(config.model.context_window)
+            conversation.truncate_to_fit(context_window)
 
             # Call LLM with tool schemas so the model can produce structured tool calls
             messages = conversation.get_messages_for_api()

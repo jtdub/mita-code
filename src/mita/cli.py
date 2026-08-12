@@ -51,6 +51,42 @@ def _safe_load_config() -> MitaConfig:
         raise typer.Exit(1) from e
 
 
+def _preflight_backend(cfg: MitaConfig, out_console: Console) -> bool:
+    """Ensure the configured LLM backend is available before a chat/ask run.
+
+    For Ollama this manages the daemon and pulls the model (existing behavior). For
+    every other provider it does a generic reachability check and never touches Ollama
+    (finding C5).
+    """
+    from mita.config.schema import LLMProvider
+
+    if cfg.llm.provider == LLMProvider.OLLAMA:
+        from mita.models.server import ensure_model, ensure_server
+
+        if not ensure_server(
+            host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=out_console
+        ):
+            return False
+        return ensure_model(
+            cfg.model.default,
+            host=cfg.ollama.host,
+            timeout=cfg.ollama.timeout,
+            console=out_console,
+        )
+
+    from mita.llm.health import backend_reachable
+    from mita.llm.providers import resolve_backend
+
+    backend = resolve_backend(cfg)
+    if not backend_reachable(backend.api_base, backend.api_key):
+        out_console.print(
+            f"[red]Cannot reach the {cfg.llm.provider.value} backend at "
+            f"{backend.api_base}.[/red]\nStart the server or fix [bold][llm] base_url[/bold]."
+        )
+        return False
+    return True
+
+
 app = typer.Typer(
     name="mita",
     help="Local-first agentic coding assistant powered by Ollama.",
@@ -667,7 +703,6 @@ def chat_command(
     from mita.agent.conversation import Conversation
     from mita.agent.loop import run_agent
     from mita.config.schema import PermissionMode
-    from mita.models.server import ensure_model, ensure_server
     from mita.tools.registry import ToolRegistry, create_default_registry
     from mita.ui.display import get_console
     from mita.ui.repl import repl_loop
@@ -685,14 +720,7 @@ def chat_command(
 
     chat_console = get_console()
 
-    if not ensure_server(
-        host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=chat_console
-    ):
-        raise typer.Exit(1)
-
-    if not ensure_model(
-        cfg.model.default, host=cfg.ollama.host, timeout=cfg.ollama.timeout, console=chat_console
-    ):
+    if not _preflight_backend(cfg, chat_console):
         raise typer.Exit(1)
 
     from mita.plugins.manager import PluginManager
@@ -768,7 +796,6 @@ def ask_command(
 
     from mita.agent.conversation import Conversation, Role
     from mita.agent.loop import run_agent
-    from mita.models.server import ensure_model, ensure_server
     from mita.tools.registry import ToolRegistry, create_default_registry
     from mita.ui.display import get_console
 
@@ -804,14 +831,7 @@ def ask_command(
     else:
         ask_console = get_console()
 
-    if not ensure_server(
-        host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=ask_console
-    ):
-        raise typer.Exit(1)
-
-    if not ensure_model(
-        cfg.model.default, host=cfg.ollama.host, timeout=cfg.ollama.timeout, console=ask_console
-    ):
+    if not _preflight_backend(cfg, ask_console):
         raise typer.Exit(1)
 
     async def _run_ask() -> Conversation:
@@ -875,39 +895,51 @@ def doctor_command() -> None:
             "Install Python 3.11 or later",
         )
 
-    # 2. Ollama binary
-    from mita.models.server import find_ollama_binary
-
-    binary = find_ollama_binary()
-    if binary:
-        doc_console.print(f"  [green]\u2713[/green] Ollama binary found ({binary})")
-    else:
-        doc_console.print("  [red]\u2717[/red] Ollama binary not found")
-        display_error_with_suggestion(
-            doc_console,
-            "Ollama is not installed",
-            "Install from https://ollama.com",
-        )
-
-    # 3. Ollama server running
-    from mita.models.server import is_server_running
-
     cfg = _safe_load_config()
-    if is_server_running(cfg.ollama.host):
-        doc_console.print("  [green]\u2713[/green] Ollama server running")
+
+    from mita.config.schema import LLMProvider
+
+    # 2-5. Backend health \u2014 Ollama gets the daemon/binary/model checks; every other
+    # provider gets a generic reachability check and no Ollama assumptions (finding C5).
+    if cfg.llm.provider == LLMProvider.OLLAMA:
+        from mita.models.server import find_ollama_binary, is_server_running
+
+        binary = find_ollama_binary()
+        if binary:
+            doc_console.print(f"  [green]\u2713[/green] Ollama binary found ({binary})")
+        else:
+            doc_console.print("  [red]\u2717[/red] Ollama binary not found")
+            display_error_with_suggestion(
+                doc_console, "Ollama is not installed", "Install from https://ollama.com"
+            )
+
+        if is_server_running(cfg.ollama.host):
+            doc_console.print("  [green]\u2713[/green] Ollama server running")
+        else:
+            doc_console.print("  [red]\u2717[/red] Ollama not running")
+            display_error_with_suggestion(
+                doc_console,
+                "Ollama server is not running",
+                "Run 'mita ollama start' or 'ollama serve'",
+            )
+
+        _check_model_installed(doc_console, cfg.model.default, "Default model", cfg)
+        _check_model_installed(doc_console, cfg.model.embedding, "Embedding model", cfg)
     else:
-        doc_console.print("  [red]\u2717[/red] Ollama not running")
-        display_error_with_suggestion(
-            doc_console,
-            "Ollama server is not running",
-            "Run 'mita ollama start' or 'ollama serve'",
-        )
+        from mita.llm.health import backend_reachable
+        from mita.llm.providers import resolve_backend
 
-    # 4. Default model installed
-    _check_model_installed(doc_console, cfg.model.default, "Default model", cfg)
-
-    # 5. Embedding model installed
-    _check_model_installed(doc_console, cfg.model.embedding, "Embedding model", cfg)
+        backend = resolve_backend(cfg)
+        label = f"{cfg.llm.provider.value} backend at {backend.api_base}"
+        if backend_reachable(backend.api_base, backend.api_key):
+            doc_console.print(f"  [green]\u2713[/green] {label} reachable")
+        else:
+            doc_console.print(f"  [red]\u2717[/red] {label} unreachable")
+            display_error_with_suggestion(
+                doc_console,
+                f"Cannot reach the {cfg.llm.provider.value} backend",
+                "Start the server or fix [llm] base_url",
+            )
 
     # 6. Config loads without error (already verified by the load_config() above)
     doc_console.print("  [green]\u2713[/green] Config loaded successfully")

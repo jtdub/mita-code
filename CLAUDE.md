@@ -3,7 +3,9 @@
 ## What This Project Is
 
 Mita Code (`mita`) is a local-first, terminal-native agentic coding assistant.
-It runs LLMs entirely on the user's machine via Ollama — no API keys, no cloud.
+It runs LLMs entirely on the user's machine — no cloud. Ollama is the default
+backend; any local OpenAI-compatible server (llama.cpp `llama-server`, vLLM,
+LM Studio, TGI) is also supported via the `[llm]` config section.
 Think "Claude Code but 100% local."
 
 ## Architecture at a Glance
@@ -11,8 +13,10 @@ Think "Claude Code but 100% local."
 - **Language**: Python 3.11+ with async (`asyncio`)
 - **Package layout**: `src/mita/` (src layout)
 - **CLI**: Typer. Entry point: `mita = "mita.cli:app"`
-- **LLM calls**: LiteLLM (for chat completions) + `ollama` client (for model management)
-- **Structured output**: Instructor in JSON mode (widest model compatibility)
+- **LLM calls**: LiteLLM (chat + embeddings), routed per provider via `llm/providers.py`;
+  `ollama` client only for Ollama model management (pull/list/delete)
+- **Tool calls**: native OpenAI-style function calling, with a text-JSON fallback for
+  models/backends that don't support it (`agent/loop.py`)
 - **Config**: Layered TOML — global (`~/.config/mita/config.toml`) → project (`.mita/settings.toml`)
 - **Memory**: Layered Markdown — global (`~/.config/mita/MITA.md`) → project → directory (`MITA.md`)
 - **Plugins**: MCP protocol (stdio + SSE transport)
@@ -22,8 +26,8 @@ Think "Claude Code but 100% local."
 
 ## Key Design Decisions
 
-1. **Instructor JSON mode is the primary tool-call path** — not native function calling.
-   This gives the widest local model compatibility. See PLANNING.md Q4.
+1. **Native function calling is the primary tool-call path**, with a text-JSON fallback
+   for backends without it. (Instructor JSON mode was removed — it was unused dead code.)
 
 2. **One tool call per file** for edits — no batch multi-file tool. Simpler schema = better
    reliability on local models.
@@ -31,8 +35,10 @@ Think "Claude Code but 100% local."
 3. **Config merge**: deep merge at leaf level. Lists (hooks, plugins, skills_paths)
    are appended, not replaced.
 
-4. **LiteLLM for chat, `ollama` for model management** — LiteLLM abstracts the completion
-   API; `ollama` client handles pull/list/delete which LiteLLM doesn't cover.
+4. **Multi-backend via a provider registry** (`llm/providers.py`) — one place maps each
+   provider to its LiteLLM prefix, base URL, api_key rule, and context-probe strategy.
+   Ollama-specific options (the runtime `options` blob, `pull`/`list`) are gated behind
+   `provider == ollama`. No `[llm]` section defaults to Ollama, unchanged for existing users.
 
 5. **Async architecture** — the agent loop, MCP lifecycle, and streaming are all async.
 
