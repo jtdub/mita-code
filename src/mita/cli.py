@@ -87,6 +87,23 @@ def _preflight_backend(cfg: MitaConfig, out_console: Console) -> bool:
     return True
 
 
+def _warn_if_index_stale(cfg: MitaConfig, out_console: Console) -> None:
+    """Warn once at session start if the code index is out of date (finding C6)."""
+    if not cfg.index.enabled:
+        return
+    from pathlib import Path
+
+    from mita.index import get_index_dir
+    from mita.index.store import IndexStore
+
+    store = IndexStore(get_index_dir())
+    if store.exists() and store.is_stale(Path.cwd()):
+        out_console.print(
+            "[yellow]The code index is stale (files changed since it was built). "
+            "Run [bold]mita index build[/bold] to refresh it.[/yellow]"
+        )
+
+
 app = typer.Typer(
     name="mita",
     help="Local-first agentic coding assistant powered by Ollama.",
@@ -723,6 +740,8 @@ def chat_command(
     if not _preflight_backend(cfg, chat_console):
         raise typer.Exit(1)
 
+    _warn_if_index_stale(cfg, chat_console)
+
     from mita.plugins.manager import PluginManager
 
     conversation = Conversation()
@@ -833,6 +852,8 @@ def ask_command(
 
     if not _preflight_backend(cfg, ask_console):
         raise typer.Exit(1)
+
+    _warn_if_index_stale(cfg, ask_console)
 
     async def _run_ask() -> Conversation:
         from mita.plugins.manager import PluginManager

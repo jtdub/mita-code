@@ -201,16 +201,26 @@ class TestHybridSearch:
         store = IndexStore(tmp_path)
         chunks = [
             CodeChunk(
-                file_path="a.py", start_line=1, end_line=1,
+                file_path="a.py",
+                start_line=1,
+                end_line=1,
                 content="def calculate_total(items): return sum(items)",
-                language="python", symbol="calculate_total",
-                chunk_id="id1", content_hash="h1", embedding=[0.1, 0.2, 0.3],
+                language="python",
+                symbol="calculate_total",
+                chunk_id="id1",
+                content_hash="h1",
+                embedding=[0.1, 0.2, 0.3],
             ),
             CodeChunk(
-                file_path="b.py", start_line=1, end_line=1,
+                file_path="b.py",
+                start_line=1,
+                end_line=1,
                 content="def render_html(template): return template",
-                language="python", symbol="render_html",
-                chunk_id="id2", content_hash="h2", embedding=[0.9, 0.8, 0.7],
+                language="python",
+                symbol="render_html",
+                chunk_id="id2",
+                content_hash="h2",
+                embedding=[0.9, 0.8, 0.7],
             ),
         ]
         await store.create_or_replace(chunks, "nomic", 1.0)
@@ -227,13 +237,87 @@ class TestHybridSearch:
         await store.create_or_replace(
             [
                 CodeChunk(
-                    file_path="a.py", start_line=1, end_line=1, content="x = 1",
-                    language="python", chunk_id="id1", content_hash="h1",
+                    file_path="a.py",
+                    start_line=1,
+                    end_line=1,
+                    content="x = 1",
+                    language="python",
+                    chunk_id="id1",
+                    content_hash="h1",
                     embedding=[0.1, 0.2, 0.3],
                 )
             ],
-            "nomic", 1.0,
+            "nomic",
+            1.0,
         )
         # An impossibly high floor drops everything.
         results = await store.hybrid_search([0.1, 0.2, 0.3], "x", top_k=5, floor=999.0)
         assert results == []
+
+
+class TestStaleness:
+    """Audit finding C6: detect a stale index against the working tree."""
+
+    @pytest.mark.asyncio()
+    async def test_fresh_index_not_stale(self, tmp_path: Path) -> None:
+        import subprocess
+
+        from mita.index.store import CodeChunk, IndexStore
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        (repo / "a.py").write_text("x = 1\n")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+
+        store = IndexStore(tmp_path / "index")
+        import time as _t
+
+        await store.create_or_replace(
+            [
+                CodeChunk(
+                    file_path="a.py",
+                    start_line=1,
+                    end_line=1,
+                    content="x = 1",
+                    language="python",
+                    chunk_id="id1",
+                    content_hash="h1",
+                    embedding=[0.1, 0.2, 0.3],
+                )
+            ],
+            "nomic",
+            _t.time() + 5,  # built "after" the file
+        )
+        assert store.is_stale(repo) is False
+
+    @pytest.mark.asyncio()
+    async def test_changed_file_makes_index_stale(self, tmp_path: Path) -> None:
+        import subprocess
+        import time as _t
+
+        from mita.index.store import CodeChunk, IndexStore
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        (repo / "a.py").write_text("x = 1\n")
+
+        store = IndexStore(tmp_path / "index")
+        await store.create_or_replace(
+            [
+                CodeChunk(
+                    file_path="a.py",
+                    start_line=1,
+                    end_line=1,
+                    content="x = 1",
+                    language="python",
+                    chunk_id="id1",
+                    content_hash="h1",
+                    embedding=[0.1, 0.2, 0.3],
+                )
+            ],
+            "nomic",
+            _t.time() - 100,  # built in the past; the untracked file is newer
+        )
+        assert store.is_stale(repo) is True

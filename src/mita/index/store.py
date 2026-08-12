@@ -273,6 +273,39 @@ class IndexStore:
 
         return await asyncio.to_thread(_sync)
 
+    def is_stale(self, root: Path) -> bool:
+        """True if a source file changed since the index was built.
+
+        Bounded and cheap: in a git repo it stats only the changed/untracked files that
+        `git status` reports, comparing their mtime to the index build time. Outside a
+        git repo it can't tell cheaply, so it reports not-stale (finding C6).
+        """
+        import subprocess
+
+        built_at = float(self.read_meta().get("built_at", 0.0) or 0.0)
+        if not built_at or not (root / ".git").exists():
+            return not built_at
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        for line in proc.stdout.splitlines():
+            rel = line[3:].strip().strip('"')
+            if " -> " in rel:  # rename: take the destination
+                rel = rel.split(" -> ", 1)[1]
+            try:
+                if (root / rel).stat().st_mtime > built_at:
+                    return True
+            except OSError:
+                continue
+        return False
+
     def exists(self) -> bool:
         """Check if the index exists on disk."""
         if not self._db_path.exists():
