@@ -119,15 +119,23 @@ def _classify(node_type: str) -> str:
 
 def parse_codebase(root: Path, config: IndexSettings) -> list[CodeChunk]:
     """Parse all supported files under root into code chunks."""
+    files = _discover_files(root, config.exclude_patterns)
+    if config.respect_gitignore:
+        files = _filter_gitignored(root, files)
     chunks: list[CodeChunk] = []
-    for file_path in _discover_files(root, config.exclude_patterns):
-        file_chunks = parse_file(file_path, root, config)
-        chunks.extend(file_chunks)
+    for file_path in files:
+        chunks.extend(parse_file(file_path, root, config))
     return chunks
 
 
 def parse_file(file_path: Path, root: Path, config: IndexSettings) -> list[CodeChunk]:
     """Parse a single file into code chunks."""
+    try:
+        if file_path.stat().st_size > config.max_file_size:
+            return []
+    except OSError:
+        return []
+
     if _is_binary(file_path):
         return []
 
@@ -178,6 +186,32 @@ def _discover_files(root: Path, exclude_patterns: list[str]) -> list[Path]:
             if not _matches_exclude(rel_file, exclude_patterns):
                 files.append(Path(dirpath) / filename)
     return files
+
+
+def _filter_gitignored(root: Path, files: list[Path]) -> list[Path]:
+    """Drop files git would ignore, using real .gitignore semantics via git.
+
+    Uses ``git check-ignore`` (negation/anchoring/** aware) rather than fnmatch. No-op
+    outside a git repo or if git is unavailable.
+    """
+    import subprocess
+
+    if not (root / ".git").exists() or not files:
+        return files
+    try:
+        rels = [str(f.relative_to(root)) for f in files]
+        proc = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--stdin"],
+            input="\n".join(rels),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return files
+    ignored = set(proc.stdout.splitlines())
+    return [f for f in files if str(f.relative_to(root)) not in ignored]
 
 
 def _matches_exclude(rel_path: str, patterns: list[str]) -> bool:

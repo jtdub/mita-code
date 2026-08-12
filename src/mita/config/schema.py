@@ -200,6 +200,10 @@ class IndexSettings(BaseModel):
     chunk_size: int = 512
     chunk_overlap: int = 64
     top_k: int = 10
+    max_file_size: int = 1_000_000  # bytes; skip files larger than this (finding C6)
+    respect_gitignore: bool = True
+    context_token_budget: int = 2000  # retrieval budget, NOT the whole context window
+    relevance_floor: float = 0.0  # drop hybrid results below this score (0 = keep all)
     exclude_patterns: list[str] = Field(
         default_factory=lambda: [
             "*.lock",
@@ -211,6 +215,31 @@ class IndexSettings(BaseModel):
             "dist/**",
             "build/**",
             "__pycache__/**",
+            # Virtualenvs / vendored / caches — omitting these embedded whole
+            # virtualenvs (finding C6).
+            ".venv/**",
+            "venv/**",
+            ".tox/**",
+            "site-packages/**",
+            "target/**",
+            "vendor/**",
+            ".next/**",
+            ".mypy_cache/**",
+            ".pytest_cache/**",
+            ".ruff_cache/**",
+            "htmlcov/**",
+            # Likely-secret files — never embed these.
+            ".env",
+            ".env.*",
+            "*.pem",
+            "*.key",
+            "id_rsa",
+            "id_dsa",
+            "credentials*",
+            ".netrc",
+            "*.p12",
+            "*.pfx",
+            "*.keystore",
         ]
     )
 

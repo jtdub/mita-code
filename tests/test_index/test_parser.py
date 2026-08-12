@@ -211,3 +211,31 @@ class TestSymbolExtractionAcrossLanguages:
         assert fn.chunk_type == "function"
         assert fn.content_hash  # non-empty
         assert fn.symbol_path == "foo"
+
+
+class TestIgnoreRules:
+    """Audit finding C6: don't index virtualenvs, secrets, or huge files."""
+
+    def test_venv_excluded_by_default(self, tmp_path: Path) -> None:
+        (tmp_path / ".venv").mkdir()
+        (tmp_path / ".venv" / "mod.py").write_text("def x():\n    return 1\n")
+        (tmp_path / "app.py").write_text("def y():\n    return 2\n")
+        chunks = parse_codebase(tmp_path, IndexSettings())
+        paths = {c.file_path for c in chunks}
+        assert "app.py" in paths
+        assert not any(".venv" in p for p in paths)
+
+    def test_secret_files_excluded(self, tmp_path: Path) -> None:
+        (tmp_path / ".env").write_text("SECRET=abc\n")
+        (tmp_path / "id_rsa").write_text("PRIVATE KEY\n")
+        (tmp_path / "app.py").write_text("x = 1\n")
+        chunks = parse_codebase(tmp_path, IndexSettings())
+        paths = {c.file_path for c in chunks}
+        assert ".env" not in paths
+        assert "id_rsa" not in paths
+
+    def test_max_file_size_skipped(self, tmp_path: Path) -> None:
+        big = tmp_path / "big.py"
+        big.write_text("# " + "x" * 5000 + "\ndef f():\n    return 1\n")
+        cfg = IndexSettings(max_file_size=100)
+        assert parse_file(big, tmp_path, cfg) == []
