@@ -10,6 +10,18 @@ from mita.config.schema import ToolSettings
 from mita.tools.builtins.git import is_safe_git_command
 from mita.tools.schema import ToolCall, ToolDefinition
 
+# Commands that are ALWAYS banned, regardless of the user's banned_commands config.
+# Pydantic replaces (does not merge) a list default when config overrides it, so
+# without this a user who sets `banned_commands = [...]` would silently drop the
+# built-in guards. These are enforced on top of the configured list (finding S11).
+CORE_BANNED_COMMANDS: list[str] = [
+    "rm -rf /",
+    "rm -rf /*",
+    "mkfs",
+    "dd if=/dev/zero",
+    ":(){ :|:& };:",  # fork bomb
+]
+
 # Paths that should never be read or written by tools
 SENSITIVE_PATH_PATTERNS: list[str] = [
     ".ssh",
@@ -119,24 +131,22 @@ def needs_confirmation(
     """Determine if a tool call needs user confirmation before execution.
 
     Returns True if:
-    - The tool is marked destructive AND confirm_destructive is on
-      AND the tool is not in the effective auto-approve set or session-approved set.
-    - Or the tool is 'shell' and the command looks destructive.
-    - Or the tool is 'git' and the subcommand is destructive (not read-only).
+    - The tool is 'shell' and the command looks destructive, or 'git' and the
+      subcommand is destructive. These ALWAYS confirm, even when the tool is
+      auto-approved or session-approved — auto-approving 'shell'/'git' is meant
+      to cover ordinary commands, not irreversible history/filesystem destruction.
+    - Or the tool is marked destructive AND it is not auto-approved or
+      session-approved for the current permission mode.
+
+    The one global override is ``confirm_destructive = False``, which disables the
+    whole gate. That key must never be honored from an untrusted project config.
     """
     if not settings.confirm_destructive:
         return False
 
-    effective = settings.effective_auto_approve
-    if session_approved:
-        effective = effective | session_approved
-
-    if tool_call.name in effective:
-        return False
-
-    if tool_def.destructive:
-        return True
-
+    # Always-confirm tier — evaluated BEFORE the auto-approve test so that a mode
+    # which auto-approves 'shell'/'git' cannot silently run `rm -rf`,
+    # `git reset --hard`, `git push --force`, or `git clean -fdx`.
     if tool_call.name == "shell":
         command = tool_call.arguments.get("command", "")
         if is_command_destructive(command):
@@ -148,6 +158,19 @@ def needs_confirmation(
         # base subcommand) but is destructive due to the -D flag.
         if is_git_command_destructive(subcommand):
             return True
+
+    effective = settings.effective_auto_approve
+    if session_approved:
+        effective = effective | session_approved
+
+    if tool_call.name in effective:
+        return False
+
+    if tool_def.destructive:
+        return True
+
+    if tool_call.name == "git":
+        subcommand = tool_call.arguments.get("subcommand", "")
         if is_safe_git_command(subcommand):
             return False
 
@@ -231,3 +254,24 @@ def validate_search_base(resolved: Path) -> str | None:
     Search bases are restricted to the workspace root and its subdirectories.
     """
     return _check_within_workspace(resolved, "Searches")
+
+
+def validate_glob_pattern(pattern: str) -> str | None:
+    """Reject glob patterns that could escape the validated search base.
+
+    ``Path.glob`` walks ``..`` segments and honors absolute anchors, so a pattern
+    like ``../../../.ssh/*`` escapes the base directory the caller validated.
+    Returns an error message if blocked, or None if allowed. Callers must STILL
+    re-validate each expanded path, because an in-tree symlink can point outside.
+    """
+    if not pattern:
+        return "Empty glob pattern"
+    if pattern.startswith("/") or pattern.startswith("~"):
+        return f"Absolute glob patterns are not allowed: {pattern}"
+    # Windows drive anchors (e.g. C:\...) are absolute too.
+    if re.match(r"^[A-Za-z]:", pattern):
+        return f"Absolute glob patterns are not allowed: {pattern}"
+    parts = re.split(r"[\\/]", pattern)
+    if ".." in parts:
+        return f"Glob pattern must not contain '..': {pattern}"
+    return None

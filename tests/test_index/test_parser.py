@@ -155,3 +155,87 @@ class TestParseCodebase:
         config = IndexSettings()
         chunks = parse_codebase(tmp_path, config)
         assert chunks == []
+
+
+class TestSymbolExtractionAcrossLanguages:
+    """Audit finding C6: _extract_symbol must work beyond plain Python."""
+
+    def _parse(self, tmp_path: Path, name: str, code: str) -> list:
+        (tmp_path / name).write_text(code)
+        cfg = IndexSettings()
+        return parse_file(tmp_path / name, tmp_path, cfg)
+
+    def _symbols(self, chunks: list) -> set[str]:
+        return {c.symbol for c in chunks if c.symbol}
+
+    def test_python_decorated_function(self, tmp_path: Path) -> None:
+        chunks = self._parse(
+            tmp_path, "a.py", "import os\n\n@deco\ndef handler(x):\n    return x\n"
+        )
+        assert "handler" in self._symbols(chunks)
+
+    def test_python_module_constants_are_indexed(self, tmp_path: Path) -> None:
+        # The import + top-level constant are NOT inside any def; must still be indexed.
+        code = "import os\n\nCONFIG = {'a': 1}\n\ndef f():\n    return CONFIG\n"
+        chunks = self._parse(tmp_path, "b.py", code)
+        joined = "\n".join(c.content for c in chunks)
+        assert "CONFIG = {'a': 1}" in joined
+        assert "import os" in joined
+
+    def test_cpp_class(self, tmp_path: Path) -> None:
+        chunks = self._parse(tmp_path, "w.cpp", "class Widget {\npublic:\n  int x;\n};\n")
+        assert "Widget" in self._symbols(chunks)
+
+    def test_cpp_function(self, tmp_path: Path) -> None:
+        chunks = self._parse(tmp_path, "f.cpp", "int add(int a, int b) {\n  return a + b;\n}\n")
+        assert "add" in self._symbols(chunks)
+
+    def test_typescript_export_function(self, tmp_path: Path) -> None:
+        chunks = self._parse(
+            tmp_path, "m.ts", "export function hello(name: string) {\n  return name;\n}\n"
+        )
+        assert "hello" in self._symbols(chunks)
+
+    def test_ruby_class(self, tmp_path: Path) -> None:
+        chunks = self._parse(tmp_path, "a.rb", "class Animal\n  def speak\n    'hi'\n  end\nend\n")
+        assert "Animal" in self._symbols(chunks)
+
+    def test_go_method(self, tmp_path: Path) -> None:
+        code = "package main\n\nfunc (r Recv) Handle() int {\n\treturn 1\n}\n"
+        chunks = self._parse(tmp_path, "h.go", code)
+        assert "Handle" in self._symbols(chunks)
+
+    def test_chunk_type_and_hash_populated(self, tmp_path: Path) -> None:
+        chunks = self._parse(tmp_path, "c.py", "def foo():\n    return 1\n")
+        fn = next(c for c in chunks if c.symbol == "foo")
+        assert fn.chunk_type == "function"
+        assert fn.content_hash  # non-empty
+        assert fn.symbol_path == "foo"
+
+
+class TestIgnoreRules:
+    """Audit finding C6: don't index virtualenvs, secrets, or huge files."""
+
+    def test_venv_excluded_by_default(self, tmp_path: Path) -> None:
+        (tmp_path / ".venv").mkdir()
+        (tmp_path / ".venv" / "mod.py").write_text("def x():\n    return 1\n")
+        (tmp_path / "app.py").write_text("def y():\n    return 2\n")
+        chunks = parse_codebase(tmp_path, IndexSettings())
+        paths = {c.file_path for c in chunks}
+        assert "app.py" in paths
+        assert not any(".venv" in p for p in paths)
+
+    def test_secret_files_excluded(self, tmp_path: Path) -> None:
+        (tmp_path / ".env").write_text("SECRET=abc\n")
+        (tmp_path / "id_rsa").write_text("PRIVATE KEY\n")
+        (tmp_path / "app.py").write_text("x = 1\n")
+        chunks = parse_codebase(tmp_path, IndexSettings())
+        paths = {c.file_path for c in chunks}
+        assert ".env" not in paths
+        assert "id_rsa" not in paths
+
+    def test_max_file_size_skipped(self, tmp_path: Path) -> None:
+        big = tmp_path / "big.py"
+        big.write_text("# " + "x" * 5000 + "\ndef f():\n    return 1\n")
+        cfg = IndexSettings(max_file_size=100)
+        assert parse_file(big, tmp_path, cfg) == []

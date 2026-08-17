@@ -39,6 +39,17 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     except (ValueError, TypeError):
         timeout = 120
 
+    # The executor injects a per-config cap; the effective timeout never exceeds it.
+    try:
+        cap = int(args.get("_timeout_cap", timeout))
+        if cap > 0:
+            timeout = min(timeout, cap)
+    except (ValueError, TypeError):
+        pass
+
+    # The executor injects the workspace root so commands run inside the project.
+    cwd = args.get("_cwd") or None
+
     if not command:
         return ToolResult(
             tool_call_id="", success=False, error="Missing required parameter: command"
@@ -49,6 +60,7 @@ async def execute(args: dict[str, Any]) -> ToolResult:
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
         )
         stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:

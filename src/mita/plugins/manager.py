@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 from typing import Any
 
 from rich.console import Console
@@ -13,6 +15,23 @@ from mita.tools.registry import ToolHandler, ToolRegistry
 from mita.tools.schema import ToolDefinition, ToolParameter, ToolResult
 
 _logger = logging.getLogger(__name__)
+
+
+def mcp_tool_name(plugin: str, tool: str) -> str:
+    """Build a registry/function name for an MCP tool.
+
+    OpenAI-compatible function names must match ^[a-zA-Z0-9_-]{1,64}$, so the old
+    ``mcp:{plugin}/{tool}`` scheme (with ':' and '/') was rejected by strict
+    providers and failed the whole request. Sanitize to underscores and, if the
+    name would exceed 64 chars, append a short hash of the original (finding: MCP
+    tool-name charset).
+    """
+    raw = f"mcp_{plugin}_{tool}"
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", raw)
+    if len(safe) > 64:
+        digest = hashlib.sha1(raw.encode()).hexdigest()[:8]
+        safe = f"{safe[:55]}_{digest}"
+    return safe
 
 
 def _schema_to_parameters(input_schema: dict[str, Any]) -> list[ToolParameter]:
@@ -29,6 +48,8 @@ def _schema_to_parameters(input_schema: dict[str, Any]) -> list[ToolParameter]:
                 description=prop.get("description", ""),
                 required=name in required,
                 default=prop.get("default"),
+                # Preserve the full property schema (enum/items/nested) for MCP tools.
+                json_schema=prop if isinstance(prop, dict) else None,
             )
         )
     return params
@@ -57,7 +78,10 @@ class PluginManager:
                 await client.connect()
                 self._clients[plugin.name] = client
                 started.append(plugin.name)
-            except (ConnectionError, OSError, TimeoutError, ValueError, RuntimeError) as e:
+            except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
+                # The MCP SDK/anyio raise McpError, BrokenResourceError, and
+                # ExceptionGroup, none of which subclass the connection errors we
+                # used to catch. A misbehaving plugin must never abort startup.
                 if console:
                     console.print(f"[yellow]Plugin '{plugin.name}' failed to start: {e}[/yellow]")
         return started
@@ -67,7 +91,9 @@ class PluginManager:
         for client in self._clients.values():
             try:
                 await client.disconnect()
-            except (ConnectionError, OSError):
+            except Exception:  # noqa: BLE001 - cleanup must not raise
+                # stop_all runs in finally blocks; one failing disconnect must not
+                # skip the others, leak subprocesses, or mask the original error.
                 pass
         self._clients.clear()
 
@@ -84,7 +110,7 @@ class PluginManager:
             await client.connect()
             self._clients[name] = client
             return True
-        except (ConnectionError, OSError, TimeoutError, ValueError, RuntimeError) as e:
+        except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
             if console:
                 console.print(f"[red]Plugin '{name}' failed to start: {e}[/red]")
             return False
@@ -109,7 +135,7 @@ class PluginManager:
         for pname, client in clients.items():
             try:
                 result[pname] = await client.list_tools()
-            except (ConnectionError, OSError, RuntimeError):
+            except Exception:  # noqa: BLE001 - untrusted plugin boundary
                 result[pname] = []
         return result
 
@@ -123,16 +149,22 @@ class PluginManager:
         for pname, client in self._clients.items():
             try:
                 tools = await client.list_tools()
-            except (ConnectionError, OSError, RuntimeError):
+            except Exception:  # noqa: BLE001 - untrusted plugin boundary
                 continue
 
             for tool in tools:
-                tool_name = f"mcp:{pname}/{tool['name']}"
+                tool_name = mcp_tool_name(pname, tool["name"])
+                # A third-party plugin tool is treated as destructive (requires
+                # confirmation) UNLESS it explicitly declares readOnlyHint=True.
+                # Without this, plugin tools defaulted to non-destructive and ran
+                # with no confirmation at all (audit finding C2).
+                read_only = tool.get("readOnlyHint") is True
                 definition = ToolDefinition(
                     name=tool_name,
                     description=tool["description"],
                     parameters=_schema_to_parameters(tool.get("inputSchema", {})),
                     source=f"mcp:{pname}",
+                    destructive=not read_only,
                 )
                 handler = _make_mcp_handler(client, tool["name"])
                 registry.register(definition, handler)
@@ -159,7 +191,7 @@ class PluginManager:
                 "tools": len(tools),
                 "tool_names": [t["name"] for t in tools],
             }
-        except (ConnectionError, OSError, RuntimeError) as e:
+        except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
             return {"name": name, "connected": True, "ping": True, "error": str(e)}
 
 
@@ -176,7 +208,7 @@ def _make_mcp_handler(client: MCPPluginClient, remote_tool_name: str) -> ToolHan
                 success=False,
                 error=f"MCP tool '{remote_tool_name}' timed out",
             )
-        except (ConnectionError, OSError, RuntimeError) as e:
+        except Exception as e:  # noqa: BLE001 - a failing plugin tool must not abort the turn
             return ToolResult(
                 tool_call_id="",
                 success=False,

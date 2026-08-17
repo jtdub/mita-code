@@ -24,7 +24,10 @@ CaptureFixture = pytest.CaptureFixture[str]
 @pytest.fixture()
 def mock_config() -> MagicMock:
     """Shared mock MitaConfig."""
+    from mita.config.schema import LLMProvider
+
     cfg = MagicMock()
+    cfg.llm.provider = LLMProvider.OLLAMA
     cfg.ollama.host = "http://localhost:11434"
     cfg.ollama.timeout = 120
     cfg.ollama.auto_manage = True
@@ -195,3 +198,19 @@ class TestShowHardware:
         assert "Hardware Information" in output
         assert "Test CPU" in output
         assert "NVIDIA RTX 4090" in output
+
+
+class TestNonOllamaProviderGuard:
+    """Audit finding C5: model commands are Ollama-only and must degrade, not crash."""
+
+    def test_check_ollama_rejects_other_provider(self, capsys: CaptureFixture) -> None:
+        from unittest.mock import MagicMock
+
+        from mita.config.schema import LLMProvider, MitaConfig
+        from mita.models.manager import _check_ollama
+
+        cfg = MitaConfig()
+        cfg.llm.provider = LLMProvider.VLLM
+        assert _check_ollama(MagicMock(), cfg) is False
+        out = capsys.readouterr().out
+        assert "Ollama-only" in out

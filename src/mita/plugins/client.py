@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -13,7 +14,25 @@ from mcp.client.stdio import stdio_client
 
 from mita.config.schema import PluginDefinition
 
+_mcp_default_env: Callable[[], dict[str, str]] | None
+try:
+    # Minimal, safe environment allowlist (PATH/HOME/etc.) provided by the SDK.
+    from mcp.client.stdio import get_default_environment as _mcp_default_env
+except ImportError:  # pragma: no cover - depends on mcp version
+    _mcp_default_env = None
+
 _logger = logging.getLogger(__name__)
+
+# Only these variables are passed through to plugin subprocesses when the SDK
+# helper is unavailable. Everything else (tokens, keys, agent sockets) is dropped.
+_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR", "PATHEXT"}
+)
+
+
+def _minimal_env() -> dict[str, str]:
+    """Return a minimal environment allowlist for plugin subprocesses."""
+    return {key: os.environ[key] for key in _ENV_ALLOWLIST if key in os.environ}
 
 
 class MCPPluginClient:
@@ -48,6 +67,8 @@ class MCPPluginClient:
                 await self._connect_stdio(timeout)
             elif self._plugin.transport == "sse":
                 await self._connect_sse(timeout)
+            elif self._plugin.transport == "streamable_http":
+                await self._connect_streamable_http(timeout)
             else:
                 raise ValueError(f"Unsupported transport: {self._plugin.transport}")
         except Exception:
@@ -64,8 +85,12 @@ class MCPPluginClient:
         if not self._plugin.command:
             raise ValueError(f"Plugin '{self.name}' requires a command for stdio transport")
 
-        # Build environment: inherit current env, overlay plugin-specific vars
-        env: dict[str, str] = {**os.environ, **self._plugin.env}
+        # Build environment from a minimal safe allowlist, then overlay the
+        # plugin's own declared vars. Do NOT inherit the full parent environment:
+        # that leaked credentials (GITHUB_TOKEN, AWS_*, SSH sockets) to every
+        # third-party plugin subprocess (audit finding C1).
+        base_env = _mcp_default_env() if _mcp_default_env is not None else _minimal_env()
+        env: dict[str, str] = {**base_env, **self._plugin.env}
 
         server_params = StdioServerParameters(
             command=self._plugin.command,
@@ -92,8 +117,34 @@ class MCPPluginClient:
 
         from mcp.client.sse import sse_client
 
-        transport = await self._exit_stack.enter_async_context(sse_client(self._plugin.url))
+        headers = self._plugin.headers or None
+        transport = await self._exit_stack.enter_async_context(
+            sse_client(self._plugin.url, headers=headers)
+        )
         read_stream, write_stream = transport
+
+        session = await self._exit_stack.enter_async_context(
+            ClientSession(read_stream, write_stream)
+        )
+        await asyncio.wait_for(session.initialize(), timeout=timeout)
+        self._session = session
+
+    async def _connect_streamable_http(self, timeout: float) -> None:
+        """Connect via Streamable HTTP transport (2025-03-26 replacement for HTTP+SSE)."""
+        if self._exit_stack is None:
+            raise RuntimeError("connect() must be called before _connect_streamable_http()")
+
+        if not self._plugin.url:
+            raise ValueError(f"Plugin '{self.name}' requires a url for streamable_http transport")
+
+        from mcp.client.streamable_http import streamablehttp_client
+
+        headers = self._plugin.headers or None
+        transport = await self._exit_stack.enter_async_context(
+            streamablehttp_client(self._plugin.url, headers=headers)
+        )
+        # Streamable HTTP yields a third element (a session-id callback) we don't need.
+        read_stream, write_stream = transport[0], transport[1]
 
         session = await self._exit_stack.enter_async_context(
             ClientSession(read_stream, write_stream)
@@ -117,14 +168,19 @@ class MCPPluginClient:
             raise RuntimeError(f"Plugin '{self.name}' is not connected")
 
         response = await self._session.list_tools()
-        return [
-            {
-                "name": tool.name,
-                "description": tool.description or "",
-                "inputSchema": tool.inputSchema,
-            }
-            for tool in response.tools
-        ]
+        tools: list[dict[str, Any]] = []
+        for tool in response.tools:
+            annotations = getattr(tool, "annotations", None)
+            read_only = getattr(annotations, "readOnlyHint", None) if annotations else None
+            tools.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "inputSchema": tool.inputSchema,
+                    "readOnlyHint": read_only,
+                }
+            )
+        return tools
 
     async def call_tool(
         self, tool_name: str, arguments: dict[str, Any], timeout: float = 120.0
@@ -150,7 +206,15 @@ class MCPPluginClient:
                 parts.append(f"[binary data: {getattr(item, 'mimeType', 'unknown')}]")
             else:
                 parts.append(str(item))
-        return "\n".join(parts)
+        text = "\n".join(parts)
+
+        # Honor the MCP isError flag: a tool that failed must not be reported to the
+        # agent as a success. Raise so the handler produces a failed ToolResult.
+        # `is True` (not truthiness) — isError is a spec bool, and this stays correct
+        # when the result is a test MagicMock whose attributes auto-create as truthy.
+        if getattr(result, "isError", False) is True:
+            raise RuntimeError(text or f"MCP tool '{tool_name}' reported an error")
+        return text
 
     async def ping(self, timeout: float = 10.0) -> bool:
         """Ping the MCP server to check connectivity."""

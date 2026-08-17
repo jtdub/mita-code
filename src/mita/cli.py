@@ -7,7 +7,7 @@ import logging
 import shlex
 import sys
 from io import StringIO
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
@@ -31,9 +31,78 @@ from mita.models.manager import (
     show_recommendations,
 )
 
+if TYPE_CHECKING:
+    from mita.config.schema import MitaConfig
+
 _logger = logging.getLogger(__name__)
 
 console = Console()
+
+
+def _safe_load_config() -> MitaConfig:
+    """Load config, converting a ConfigError into a clean CLI error + exit."""
+    from mita.config.loader import ConfigError
+    from mita.config.loader import load_config as _load_config
+
+    try:
+        return _load_config()
+    except ConfigError as e:
+        console.print(f"[red]Configuration error:[/red] {e}")
+        raise typer.Exit(1) from e
+
+
+def _preflight_backend(cfg: MitaConfig, out_console: Console) -> bool:
+    """Ensure the configured LLM backend is available before a chat/ask run.
+
+    For Ollama this manages the daemon and pulls the model (existing behavior). For
+    every other provider it does a generic reachability check and never touches Ollama
+    (finding C5).
+    """
+    from mita.config.schema import LLMProvider
+
+    if cfg.llm.provider == LLMProvider.OLLAMA:
+        from mita.models.server import ensure_model, ensure_server
+
+        if not ensure_server(
+            host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=out_console
+        ):
+            return False
+        return ensure_model(
+            cfg.model.default,
+            host=cfg.ollama.host,
+            timeout=cfg.ollama.timeout,
+            console=out_console,
+        )
+
+    from mita.llm.health import backend_reachable
+    from mita.llm.providers import resolve_backend
+
+    backend = resolve_backend(cfg)
+    if not backend_reachable(backend.api_base, backend.api_key):
+        out_console.print(
+            f"[red]Cannot reach the {cfg.llm.provider.value} backend at "
+            f"{backend.api_base}.[/red]\nStart the server or fix [bold][llm] base_url[/bold]."
+        )
+        return False
+    return True
+
+
+def _warn_if_index_stale(cfg: MitaConfig, out_console: Console) -> None:
+    """Warn once at session start if the code index is out of date (finding C6)."""
+    if not cfg.index.enabled:
+        return
+    from pathlib import Path
+
+    from mita.index import get_index_dir
+    from mita.index.store import IndexStore
+
+    store = IndexStore(get_index_dir())
+    if store.exists() and store.is_stale(Path.cwd()):
+        out_console.print(
+            "[yellow]The code index is stale (files changed since it was built). "
+            "Run [bold]mita index build[/bold] to refresh it.[/yellow]"
+        )
+
 
 app = typer.Typer(
     name="mita",
@@ -583,6 +652,53 @@ def ollama_status() -> None:
 # ── Chat / Ask commands ───────────────────────────────────────────
 
 
+def _ensure_project_trust(interactive: bool) -> None:
+    """Prompt to trust a project whose config can run code (audit finding C1).
+
+    If the current project's .mita/settings.toml declares hooks, plugins, or
+    gate-weakening tool settings and the directory is not yet trusted, ask the user
+    (when interactive) whether to trust it. Untrusted security-relevant keys are
+    ignored by load_config until the directory is trusted.
+    """
+    import tomllib
+
+    from mita.config.defaults import get_project_config_path
+    from mita.config.trust import add_trusted, is_trusted, security_relevant_keys
+
+    project_path = get_project_config_path()
+    if project_path is None:
+        return
+    project_root = project_path.parent.parent
+    if is_trusted(project_root):
+        return
+    try:
+        with open(project_path, "rb") as f:
+            project_data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return
+    keys = security_relevant_keys(project_data)
+    if not keys:
+        return
+
+    key_list = ", ".join(keys)
+    console.print(
+        f"[yellow]This project's .mita/settings.toml can run code or change safety "
+        f"settings (keys: {key_list}).[/yellow]"
+    )
+    if not interactive:
+        console.print(
+            "[yellow]Running non-interactively; these settings are ignored. "
+            "Run 'mita chat' here once to trust this directory.[/yellow]"
+        )
+        return
+    answer = console.input(f"Trust {project_root} and apply these settings? [y/N] ").strip().lower()
+    if answer in ("y", "yes"):
+        add_trusted(project_root)
+        console.print(f"[green]Trusted {project_root}.[/green]")
+    else:
+        console.print("[yellow]Not trusted. These settings are ignored this session.[/yellow]")
+
+
 @app.command("chat")
 def chat_command(
     no_tools: Annotated[
@@ -597,20 +713,23 @@ def chat_command(
             help="Permission mode: ask (default), auto_edit, or trust.",
         ),
     ] = None,
+    tui: Annotated[
+        bool,
+        typer.Option("--tui", help="Launch the full-screen Textual TUI (built-in tools only)."),
+    ] = False,
 ) -> None:
     """Open an interactive chat session with the agent."""
     import asyncio
 
     from mita.agent.conversation import Conversation
     from mita.agent.loop import run_agent
-    from mita.config.loader import load_config as _load_config
     from mita.config.schema import PermissionMode
-    from mita.models.server import ensure_model, ensure_server
     from mita.tools.registry import ToolRegistry, create_default_registry
     from mita.ui.display import get_console
     from mita.ui.repl import repl_loop
 
-    cfg = _load_config()
+    _ensure_project_trust(interactive=True)
+    cfg = _safe_load_config()
 
     if permission is not None:
         try:
@@ -622,20 +741,26 @@ def chat_command(
 
     chat_console = get_console()
 
-    if not ensure_server(
-        host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=chat_console
-    ):
+    if not _preflight_backend(cfg, chat_console):
         raise typer.Exit(1)
 
-    if not ensure_model(
-        cfg.model.default, host=cfg.ollama.host, timeout=cfg.ollama.timeout, console=chat_console
-    ):
-        raise typer.Exit(1)
+    _warn_if_index_stale(cfg, chat_console)
+
+    if tui:
+        # Textual TUI path. MCP plugins are not auto-started here (their sessions are
+        # bound to the loop that creates them); use `mita chat` for MCP-backed tools.
+        from mita.ui.tui.app import run_tui
+
+        tui_registry = ToolRegistry() if no_tools else create_default_registry()
+        run_tui(cfg, tui_registry, session_approved=set())
+        return
 
     from mita.plugins.manager import PluginManager
 
     conversation = Conversation()
     registry: ToolRegistry = ToolRegistry() if no_tools else create_default_registry()
+    # Tools the user approved "always" persist for the whole chat session.
+    session_approved: set[str] = set()
 
     async def _run_chat() -> None:
         nonlocal conversation
@@ -652,15 +777,43 @@ def chat_command(
             async def on_input(user_input: str) -> None:
                 nonlocal conversation
                 conversation = await run_agent(
-                    user_input, cfg, chat_console, conversation=conversation, registry=registry
+                    user_input,
+                    cfg,
+                    chat_console,
+                    conversation=conversation,
+                    registry=registry,
+                    session_approved=session_approved,
                 )
 
             def on_clear() -> None:
                 nonlocal conversation
                 conversation.clear_non_system()
 
+            def on_reload() -> None:
+                # Re-read config + memory and rebuild the system prompt in place, keeping
+                # the conversation history (audit finding S7).
+                nonlocal cfg
+                from mita.agent.context import assemble_context
+                from mita.agent.conversation import Conversation, Role
+                from mita.config.loader import ConfigError
+                from mita.config.loader import load_config as _lc
+
+                try:
+                    cfg = _lc()
+                except ConfigError as e:
+                    chat_console.print(f"[red]Reload failed (keeping old config): {e}[/red]")
+                    return
+                fresh = Conversation()
+                assemble_context(fresh, cfg, registry)
+                non_system = [m for m in conversation.messages if m.role != Role.SYSTEM]
+                conversation.messages = [fresh.messages[0], *non_system]
+
             await repl_loop(
-                chat_console, on_input, on_clear=on_clear, skills_paths=cfg.skills_paths
+                chat_console,
+                on_input,
+                on_clear=on_clear,
+                skills_paths=cfg.skills_paths,
+                on_reload=on_reload,
             )
         finally:
             if plugin_mgr is not None:
@@ -683,6 +836,14 @@ def ask_command(
         bool,
         typer.Option("--no-tools", help="Disable all tools."),
     ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Approve destructive actions without prompting (non-interactive).",
+        ),
+    ] = False,
 ) -> None:
     """Send a single prompt to the agent (non-interactive)."""
     import asyncio
@@ -690,8 +851,6 @@ def ask_command(
 
     from mita.agent.conversation import Conversation, Role
     from mita.agent.loop import run_agent
-    from mita.config.loader import load_config as _load_config
-    from mita.models.server import ensure_model, ensure_server
     from mita.tools.registry import ToolRegistry, create_default_registry
     from mita.ui.display import get_console
 
@@ -714,7 +873,8 @@ def ask_command(
     if effective_output is None:
         effective_output = OutputFormat.TEXT if not sys.stdout.isatty() else OutputFormat.RICH
 
-    cfg = _load_config()
+    _ensure_project_trust(interactive=False)
+    cfg = _safe_load_config()
 
     # Build the console for this run
     if effective_output == OutputFormat.TEXT:
@@ -726,15 +886,10 @@ def ask_command(
     else:
         ask_console = get_console()
 
-    if not ensure_server(
-        host=cfg.ollama.host, auto_manage=cfg.ollama.auto_manage, console=ask_console
-    ):
+    if not _preflight_backend(cfg, ask_console):
         raise typer.Exit(1)
 
-    if not ensure_model(
-        cfg.model.default, host=cfg.ollama.host, timeout=cfg.ollama.timeout, console=ask_console
-    ):
-        raise typer.Exit(1)
+    _warn_if_index_stale(cfg, ask_console)
 
     async def _run_ask() -> Conversation:
         from mita.plugins.manager import PluginManager
@@ -748,7 +903,9 @@ def ask_command(
             await plugin_mgr.register_tools(registry)
 
         try:
-            return await run_agent(full_prompt, cfg, ask_console, registry=registry)
+            return await run_agent(
+                full_prompt, cfg, ask_console, registry=registry, auto_confirm=yes
+            )
         finally:
             if plugin_mgr is not None:
                 await plugin_mgr.stop_all()
@@ -795,42 +952,62 @@ def doctor_command() -> None:
             "Install Python 3.11 or later",
         )
 
-    # 2. Ollama binary
-    from mita.models.server import find_ollama_binary
+    cfg = _safe_load_config()
 
-    binary = find_ollama_binary()
-    if binary:
-        doc_console.print(f"  [green]\u2713[/green] Ollama binary found ({binary})")
+    from mita.config.schema import LLMProvider
+
+    # 2-5. Backend health \u2014 Ollama gets the daemon/binary/model checks; every other
+    # provider gets a generic reachability check and no Ollama assumptions (finding C5).
+    if cfg.llm.provider == LLMProvider.OLLAMA:
+        from mita.models.server import find_ollama_binary, is_server_running
+
+        binary = find_ollama_binary()
+        if binary:
+            doc_console.print(f"  [green]\u2713[/green] Ollama binary found ({binary})")
+        else:
+            doc_console.print("  [red]\u2717[/red] Ollama binary not found")
+            display_error_with_suggestion(
+                doc_console, "Ollama is not installed", "Install from https://ollama.com"
+            )
+
+        if is_server_running(cfg.ollama.host):
+            doc_console.print("  [green]\u2713[/green] Ollama server running")
+        else:
+            doc_console.print("  [red]\u2717[/red] Ollama not running")
+            display_error_with_suggestion(
+                doc_console,
+                "Ollama server is not running",
+                "Run 'mita ollama start' or 'ollama serve'",
+            )
+
+        _check_model_installed(doc_console, cfg.model.default, "Default model", cfg)
+        _check_model_installed(doc_console, cfg.model.embedding, "Embedding model", cfg)
     else:
-        doc_console.print("  [red]\u2717[/red] Ollama binary not found")
-        display_error_with_suggestion(
-            doc_console,
-            "Ollama is not installed",
-            "Install from https://ollama.com",
-        )
+        from mita.llm.health import backend_reachable
+        from mita.llm.providers import resolve_backend
 
-    # 3. Ollama server running
-    from mita.models.server import is_server_running
-
-    cfg = load_config()
-    if is_server_running(cfg.ollama.host):
-        doc_console.print("  [green]\u2713[/green] Ollama server running")
-    else:
-        doc_console.print("  [red]\u2717[/red] Ollama not running")
-        display_error_with_suggestion(
-            doc_console,
-            "Ollama server is not running",
-            "Run 'mita ollama start' or 'ollama serve'",
-        )
-
-    # 4. Default model installed
-    _check_model_installed(doc_console, cfg.model.default, "Default model", cfg)
-
-    # 5. Embedding model installed
-    _check_model_installed(doc_console, cfg.model.embedding, "Embedding model", cfg)
+        backend = resolve_backend(cfg)
+        label = f"{cfg.llm.provider.value} backend at {backend.api_base}"
+        if backend_reachable(backend.api_base, backend.api_key):
+            doc_console.print(f"  [green]\u2713[/green] {label} reachable")
+        else:
+            doc_console.print(f"  [red]\u2717[/red] {label} unreachable")
+            display_error_with_suggestion(
+                doc_console,
+                f"Cannot reach the {cfg.llm.provider.value} backend",
+                "Start the server or fix [llm] base_url",
+            )
 
     # 6. Config loads without error (already verified by the load_config() above)
     doc_console.print("  [green]\u2713[/green] Config loaded successfully")
+
+    from mita.config.loader import find_unknown_config_keys
+
+    unknown = find_unknown_config_keys()
+    if unknown:
+        doc_console.print(
+            f"  [yellow]![/yellow] Unknown config keys (ignored): {', '.join(unknown)}"
+        )
 
     # 7. Memory files discoverable
     from mita.memory.discovery import discover_memory_files

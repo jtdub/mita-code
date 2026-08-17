@@ -14,13 +14,13 @@ class TestLLMClient:
     def test_init(self) -> None:
         config = MitaConfig()
         client = LLMClient(config)
-        assert "ollama/" in client.model
+        assert "ollama_chat/" in client.model
         assert config.model.default in client.model
 
     def test_model_property(self) -> None:
         config = MitaConfig()
         client = LLMClient(config)
-        assert client.model == f"ollama/{config.model.default}"
+        assert client.model == f"ollama_chat/{config.model.default}"
 
     @pytest.mark.asyncio()
     async def test_chat(self) -> None:

@@ -194,8 +194,11 @@ class TestNeedsConfirmation:
         )
         assert needs_confirmation(call, tool_def, settings) is True
 
-    def test_trust_mode_approves_everything(self) -> None:
-        """In trust mode, even destructive shell commands should be auto-approved."""
+    def test_trust_mode_still_confirms_destructive_shell(self) -> None:
+        """Even in trust mode, a destructive shell command must still confirm.
+
+        Auto-approving 'shell' covers ordinary commands, not `rm -rf`.
+        """
         from mita.config.schema import PermissionMode
 
         settings = ToolSettings(permission_mode=PermissionMode.TRUST)
@@ -203,6 +206,41 @@ class TestNeedsConfirmation:
         tool_def = ToolDefinition(
             name="shell", description="shell", parameters=[], destructive=True
         )
+        assert needs_confirmation(call, tool_def, settings) is True
+
+    def test_trust_mode_approves_safe_shell(self) -> None:
+        """Trust mode still auto-approves ordinary (non-destructive) shell commands."""
+        from mita.config.schema import PermissionMode
+
+        settings = ToolSettings(permission_mode=PermissionMode.TRUST)
+        call = ToolCall(id="1", name="shell", arguments={"command": "ls -la"})
+        tool_def = ToolDefinition(
+            name="shell", description="shell", parameters=[], destructive=True
+        )
+        assert needs_confirmation(call, tool_def, settings) is False
+
+    @pytest.mark.parametrize("mode", ["auto_edit", "trust"])
+    @pytest.mark.parametrize(
+        "subcmd",
+        ["reset --hard HEAD~1", "push --force origin main", "clean -fdx", "branch -D main"],
+    )
+    def test_destructive_git_confirms_even_when_auto_approved(self, mode: str, subcmd: str) -> None:
+        """auto_edit/trust auto-approve 'git', but destructive subcommands still confirm."""
+        from mita.config.schema import PermissionMode
+
+        settings = ToolSettings(permission_mode=PermissionMode(mode))
+        call = ToolCall(id="1", name="git", arguments={"subcommand": subcmd})
+        tool_def = ToolDefinition(name="git", description="git", parameters=[], destructive=False)
+        assert needs_confirmation(call, tool_def, settings) is True
+
+    @pytest.mark.parametrize("mode", ["auto_edit", "trust"])
+    def test_safe_git_auto_approved_in_permission_modes(self, mode: str) -> None:
+        """A read-only git subcommand is still auto-approved in auto_edit/trust."""
+        from mita.config.schema import PermissionMode
+
+        settings = ToolSettings(permission_mode=PermissionMode(mode))
+        call = ToolCall(id="1", name="git", arguments={"subcommand": "status"})
+        tool_def = ToolDefinition(name="git", description="git", parameters=[], destructive=False)
         assert needs_confirmation(call, tool_def, settings) is False
 
     def test_session_approved_skips_confirm(self) -> None:

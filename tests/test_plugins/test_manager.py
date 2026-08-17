@@ -169,8 +169,8 @@ class TestPluginManager:
         count = await mgr.register_tools(registry)
 
         assert count == 1
-        assert registry.has_tool("mcp:fs/read_file")
-        defn = registry.get_definition("mcp:fs/read_file")
+        assert registry.has_tool("mcp_fs_read_file")
+        defn = registry.get_definition("mcp_fs_read_file")
         assert defn is not None
         assert defn.source == "mcp:fs"
         assert len(defn.parameters) == 1
@@ -262,7 +262,99 @@ class TestPluginManager:
         from mita.tools.schema import ToolCall
 
         result = await registry.execute(
-            ToolCall(id="tc1", name="mcp:greeter/greet", arguments={"name": "World"})
+            ToolCall(id="tc1", name="mcp_greeter_greet", arguments={"name": "World"})
         )
         assert result.success is True
         assert result.output == "Hello, World!"
+
+
+class TestMCPToolConfirmation:
+    """Audit finding C2: plugin tools must pass through the confirmation gate."""
+
+    @staticmethod
+    def _client_with_tool(read_only_hint: object) -> AsyncMock:
+        tool: dict[str, object] = {
+            "name": "do_thing",
+            "description": "Does a thing",
+            "inputSchema": {"type": "object", "properties": {}},
+        }
+        if read_only_hint is not None:
+            tool["readOnlyHint"] = read_only_hint
+        client = AsyncMock()
+        client.list_tools = AsyncMock(return_value=[tool])
+        client.call_tool = AsyncMock(return_value="done")
+        return client
+
+    @pytest.mark.asyncio
+    async def test_plugin_tool_defaults_destructive_and_confirms(self) -> None:
+        from mita.config.schema import ToolSettings
+        from mita.tools.executor import execute_tool
+        from mita.tools.schema import ToolCall
+
+        mgr = PluginManager([])
+        mgr._clients["srv"] = self._client_with_tool(read_only_hint=None)
+        registry = ToolRegistry()
+        await mgr.register_tools(registry)
+
+        definition = registry.get_definition("mcp_srv_do_thing")
+        assert definition is not None
+        assert definition.destructive is True
+
+        prompts: list[str] = []
+
+        async def confirm(prompt: str) -> bool:
+            prompts.append(prompt)
+            return False
+
+        result = await execute_tool(
+            ToolCall(id="1", name="mcp_srv_do_thing", arguments={}),
+            registry,
+            ToolSettings(),
+            confirm_fn=confirm,
+        )
+        assert prompts, "plugin tool must ask for confirmation"
+        assert result.success is False
+        assert "denied" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_read_only_plugin_tool_skips_confirmation(self) -> None:
+        from mita.config.schema import ToolSettings
+        from mita.tools.executor import execute_tool
+        from mita.tools.schema import ToolCall
+
+        mgr = PluginManager([])
+        mgr._clients["srv"] = self._client_with_tool(read_only_hint=True)
+        registry = ToolRegistry()
+        await mgr.register_tools(registry)
+
+        definition = registry.get_definition("mcp_srv_do_thing")
+        assert definition is not None
+        assert definition.destructive is False
+
+        # No confirm_fn: a read-only tool must still run (not be auto-denied).
+        result = await execute_tool(
+            ToolCall(id="1", name="mcp_srv_do_thing", arguments={}),
+            registry,
+            ToolSettings(),
+            confirm_fn=None,
+        )
+        assert result.success is True
+        assert result.output == "done"
+
+
+class TestMcpToolName:
+    """Audit finding: mcp: tool names must be OpenAI-function-name safe."""
+
+    def test_sanitizes_colon_and_slash(self) -> None:
+        from mita.plugins.manager import mcp_tool_name
+
+        name = mcp_tool_name("my-server", "read/file")
+        assert name == "mcp_my-server_read_file"
+        assert all(c.isalnum() or c in "_-" for c in name)
+
+    def test_truncates_and_hashes_long_names(self) -> None:
+        from mita.plugins.manager import mcp_tool_name
+
+        name = mcp_tool_name("p" * 50, "t" * 50)
+        assert len(name) <= 64
+        assert all(c.isalnum() or c in "_-" for c in name)

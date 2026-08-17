@@ -113,3 +113,19 @@ class TestLoadMemoryRaw:
         assert path == mem
         assert scope == "project"
         assert "# Test" in content
+
+
+class TestTotalTokenCap:
+    """Audit finding S5: total injected memory is capped by max_total_tokens."""
+
+    def test_total_cap_truncates(self, tmp_path: Path) -> None:
+        from mita.config.schema import MemorySettings
+        from mita.memory.loader import load_memory
+
+        big = tmp_path / "MITA.md"
+        big.write_text("x" * 10000 + "\n")
+        settings = MemorySettings(max_lines_per_file=1000, max_total_tokens=100)  # ~400 chars
+
+        result = load_memory(cwd=tmp_path, settings=settings)
+        assert "truncated to fit max_total_tokens" in result
+        assert len(result) < 1000

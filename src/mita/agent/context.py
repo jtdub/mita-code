@@ -30,8 +30,8 @@ def assemble_context(
     """
     working_dir = cwd or Path.cwd()
 
-    # Load memory from MITA.md files
-    memory_content = load_memory(cwd=working_dir)
+    # Load memory from MITA.md files, honoring the configured memory limits.
+    memory_content = load_memory(cwd=working_dir, settings=config.memory)
 
     # Build system prompt
     system_prompt = build_system_prompt(

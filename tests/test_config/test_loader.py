@@ -92,3 +92,83 @@ class TestLoadConfig:
         cfg = load_config(project_root=tmp_project)
         assert "~/.config/mita/skills" in cfg.skills_paths
         assert ".mita/skills" in cfg.skills_paths
+
+
+class TestConfigErrors:
+    """Audit finding S1: a malformed config raises a clean ConfigError, not a traceback."""
+
+    def test_malformed_toml_raises_config_error(self) -> None:
+        from pathlib import Path
+
+        import pytest
+
+        from mita.config.loader import ConfigError, load_config
+
+        global_dir = Path.home() / ".config" / "mita"
+        global_dir.mkdir(parents=True)
+        (global_dir / "config.toml").write_text("this is = not valid toml [[[\n")
+
+        with pytest.raises(ConfigError, match="Malformed TOML"):
+            load_config()
+
+    def test_invalid_value_raises_config_error(self) -> None:
+        from pathlib import Path
+
+        import pytest
+
+        from mita.config.loader import ConfigError, load_config
+
+        global_dir = Path.home() / ".config" / "mita"
+        global_dir.mkdir(parents=True)
+        (global_dir / "config.toml").write_text('[model]\ntemperature = "hot"\n')
+
+        with pytest.raises(ConfigError, match="Invalid configuration"):
+            load_config()
+
+
+class TestListDedup:
+    """Audit finding S10: appended lists are de-duplicated so hooks don't run twice."""
+
+    def test_duplicate_scalars_deduped(self) -> None:
+        from mita.config.loader import _deep_merge
+
+        result = _deep_merge({"items": [1, 2]}, {"items": [2, 3]})
+        assert result["items"] == [1, 2, 3]
+
+    def test_duplicate_dicts_deduped(self) -> None:
+        from mita.config.loader import _deep_merge
+
+        hook = {"event": "session_start", "command": "echo hi"}
+        result = _deep_merge({"hooks": [hook]}, {"hooks": [dict(hook)]})
+        assert result["hooks"] == [hook]
+
+
+class TestUnknownKeys:
+    """Audit finding S2: unknown config keys are detected (so the CLI can warn)."""
+
+    def test_detects_unknown_top_level(self, tmp_project: Path) -> None:
+        from mita.config.loader import find_unknown_config_keys
+
+        mita_dir = tmp_project / ".mita"
+        mita_dir.mkdir(exist_ok=True)
+        (mita_dir / "settings.toml").write_text("max_iteration = 5\ntotally_bogus = 1\n")
+        unknown = find_unknown_config_keys(project_root=tmp_project)
+        assert "max_iteration" in unknown
+        assert "totally_bogus" in unknown
+
+    def test_detects_unknown_nested(self, tmp_project: Path) -> None:
+        from mita.config.loader import find_unknown_config_keys
+
+        mita_dir = tmp_project / ".mita"
+        mita_dir.mkdir(exist_ok=True)
+        (mita_dir / "settings.toml").write_text("[model]\nnope = true\n")
+        unknown = find_unknown_config_keys(project_root=tmp_project)
+        assert "model.nope" in unknown
+
+    def test_known_keys_are_clean(self, tmp_project: Path) -> None:
+        from mita.config.loader import find_unknown_config_keys
+
+        mita_dir = tmp_project / ".mita"
+        mita_dir.mkdir(exist_ok=True)
+        (mita_dir / "settings.toml").write_text('[model]\ndefault = "x"\nmax_tokens = 2048\n')
+        assert find_unknown_config_keys(project_root=tmp_project) == []

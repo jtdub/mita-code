@@ -3,8 +3,55 @@
 from __future__ import annotations
 
 import enum
+import os
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class LLMProvider(enum.StrEnum):
+    """Local inference backend that serves the chat/embeddings API.
+
+    All except ``ollama`` are OpenAI-compatible HTTP servers. ``ollama`` keeps its
+    native API (and daemon management via the ``[ollama]`` section).
+    """
+
+    OLLAMA = "ollama"
+    LLAMACPP = "llamacpp"
+    VLLM = "vllm"
+    LMSTUDIO = "lmstudio"
+    TGI = "tgi"
+    OPENAI_COMPATIBLE = "openai_compatible"
+
+
+class LLMSettings(BaseModel):
+    """Backend selection for chat and embeddings (audit finding C5).
+
+    Backward compatible: with no ``[llm]`` section the provider defaults to Ollama and
+    the existing ``[ollama] host`` is used as the base URL.
+    """
+
+    provider: LLMProvider = LLMProvider.OLLAMA
+    base_url: str = ""  # empty → provider default (Ollama uses [ollama] host)
+    api_key: str = ""  # empty → placeholder for openai-routed providers
+    context_probe: str = "auto"  # auto | off | <int>
+
+    @field_validator("api_key", "base_url")
+    @classmethod
+    def _expand_env(cls, v: str) -> str:
+        """Expand ${VAR}/$VAR from the environment so secrets aren't stored in TOML."""
+        return os.path.expandvars(v)
+
+    @field_validator("context_probe")
+    @classmethod
+    def _valid_probe(cls, v: str) -> str:
+        if v in ("auto", "off"):
+            return v
+        try:
+            if int(v) > 0:
+                return v
+        except ValueError:
+            pass
+        raise ValueError('context_probe must be "auto", "off", or a positive integer')
 
 
 class PermissionMode(enum.StrEnum):
@@ -153,6 +200,10 @@ class IndexSettings(BaseModel):
     chunk_size: int = 512
     chunk_overlap: int = 64
     top_k: int = 10
+    max_file_size: int = 1_000_000  # bytes; skip files larger than this (finding C6)
+    respect_gitignore: bool = True
+    context_token_budget: int = 2000  # retrieval budget, NOT the whole context window
+    relevance_floor: float = 0.0  # drop hybrid results below this score (0 = keep all)
     exclude_patterns: list[str] = Field(
         default_factory=lambda: [
             "*.lock",
@@ -164,6 +215,31 @@ class IndexSettings(BaseModel):
             "dist/**",
             "build/**",
             "__pycache__/**",
+            # Virtualenvs / vendored / caches — omitting these embedded whole
+            # virtualenvs (finding C6).
+            ".venv/**",
+            "venv/**",
+            ".tox/**",
+            "site-packages/**",
+            "target/**",
+            "vendor/**",
+            ".next/**",
+            ".mypy_cache/**",
+            ".pytest_cache/**",
+            ".ruff_cache/**",
+            "htmlcov/**",
+            # Likely-secret files — never embed these.
+            ".env",
+            ".env.*",
+            "*.pem",
+            "*.key",
+            "id_rsa",
+            "id_dsa",
+            "credentials*",
+            ".netrc",
+            "*.p12",
+            "*.pfx",
+            "*.keystore",
         ]
     )
 
@@ -208,11 +284,21 @@ class PluginDefinition(BaseModel):
     """An MCP plugin server definition."""
 
     name: str
-    transport: str = "stdio"
+    transport: str = "stdio"  # stdio | sse | streamable_http
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     url: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
+    # HTTP headers for sse/streamable_http transports (auth). Values expand ${ENV_VAR}
+    # so tokens aren't stored in TOML (audit finding F2.2).
+    headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("transport")
+    @classmethod
+    def validate_transport(cls, v: str) -> str:
+        if v not in ("stdio", "sse", "streamable_http"):
+            raise ValueError(f"transport must be stdio, sse, or streamable_http, got: {v}")
+        return v
 
     @field_validator("url")
     @classmethod
@@ -220,6 +306,11 @@ class PluginDefinition(BaseModel):
         if v is not None and not v.startswith(("http://", "https://")):
             raise ValueError(f"Plugin URL must start with http:// or https://, got: {v}")
         return v
+
+    @field_validator("headers")
+    @classmethod
+    def expand_header_env(cls, v: dict[str, str]) -> dict[str, str]:
+        return {k: os.path.expandvars(val) for k, val in v.items()}
 
 
 class UISettings(BaseModel):
@@ -234,6 +325,7 @@ class UISettings(BaseModel):
 class MitaConfig(BaseModel):
     """Root configuration model — result of merging global + project TOML."""
 
+    llm: LLMSettings = Field(default_factory=LLMSettings)
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     model: ModelSettings = Field(default_factory=ModelSettings)
     tools: ToolSettings = Field(default_factory=ToolSettings)

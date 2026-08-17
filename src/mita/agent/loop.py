@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -21,17 +22,7 @@ from mita.llm.streaming import extract_delta_content
 from mita.tools.executor import execute_tool
 from mita.tools.registry import ToolRegistry, create_default_registry
 from mita.tools.schema import ToolCall
-from mita.ui.display import (
-    display_error,
-    display_markdown,
-    display_response_stats,
-    display_streaming_end,
-    display_streaming_token,
-    display_tool_call,
-    display_tool_result,
-    prompt_user_confirm,
-)
-from mita.ui.spinner import thinking_spinner
+from mita.ui.sink import ConfirmDecision, ConfirmRequest, RichConsoleSink, UISink
 
 _logger = logging.getLogger(__name__)
 
@@ -46,23 +37,31 @@ async def run_agent(
     registry: ToolRegistry | None = None,
     llm_client: LLMClient | None = None,
     session_approved: set[str] | None = None,
+    auto_confirm: bool = False,
+    sink: UISink | None = None,
 ) -> Conversation:
     """Run the agent loop for a single user prompt.
 
     Args:
         user_prompt: The user's input.
         config: Application configuration.
-        console: Rich console for output.
+        console: Rich console for output (used to build the default sink).
         conversation: Existing conversation to continue, or None to start fresh.
         registry: Tool registry, or None to create default.
         llm_client: LLM client, or None to create from config.
         session_approved: Tool names approved for the session (skip confirmation).
-            Not mutated by the agent loop — callers manage the set.
+            The loop adds a tool name here when the user answers "always".
+        auto_confirm: When True, approve destructive actions without prompting
+            (used by non-interactive `mita ask --yes`).
+        sink: UI event sink; defaults to a RichConsoleSink over ``console``. A Textual
+            TUI passes its own sink so the loop needs no changes.
 
     Returns:
         The updated conversation.
     """
     # Initialize
+    if sink is None:
+        sink = RichConsoleSink(console)
     if registry is None:
         registry = create_default_registry()
 
@@ -97,7 +96,9 @@ async def run_agent(
                             content=f"{_RAG_CONTEXT_PREFIX}\n{rag_context}",
                         )
                     )
-        except (ConnectionError, FileNotFoundError, ImportError, OSError):
+        except Exception:  # noqa: BLE001 - RAG is optional; never let it abort the turn
+            # Broad by design: embedding backends raise provider-specific errors
+            # (ollama.ResponseError, httpx.HTTPError, ...) that must degrade, not crash.
             _logger.warning("RAG index unavailable, proceeding without it", exc_info=True)
 
     # Fire session_start hooks
@@ -111,6 +112,11 @@ async def run_agent(
             timeout=config.hook_settings.timeout,
         )
 
+    # Resolve the effective context window (probe the backend, else the config value).
+    from mita.llm.context import resolve_context_window
+
+    context_window = await resolve_context_window(config)
+
     # Agent loop
     last_tool_signature: str | None = None
     repeat_count = 0
@@ -120,38 +126,37 @@ async def run_agent(
     for _iteration in range(max_iterations):
         try:
             # Truncate to fit context window
-            conversation.truncate_to_fit(config.model.context_window)
+            conversation.truncate_to_fit(context_window)
 
             # Call LLM with tool schemas so the model can produce structured tool calls
             messages = conversation.get_messages_for_api()
 
             if config.ui.stream:
                 assistant_text, tool_calls_raw, stats = await _stream_response(
-                    llm_client, messages, tool_schemas, console
+                    llm_client, messages, tool_schemas, sink
                 )
                 if config.ui.show_token_count:
-                    display_response_stats(
-                        console,
-                        prompt_tokens=stats.prompt_tokens,
-                        completion_tokens=stats.completion_tokens,
-                        total_time=stats.total_time,
-                        ttft=stats.ttft,
+                    sink.response_stats(
+                        stats.prompt_tokens,
+                        stats.completion_tokens,
+                        stats.total_time,
+                        stats.ttft,
                     )
             else:
                 t0 = time.monotonic()
-                with thinking_spinner(console):
+                with sink.busy("Thinking..."):
                     response = await llm_client.chat(messages, tools=tool_schemas)
                 elapsed = time.monotonic() - t0
                 assistant_text, tool_calls_raw = _parse_response(response)
                 if assistant_text:
-                    display_markdown(console, assistant_text)
+                    sink.assistant_message(assistant_text)
                 if config.ui.show_token_count:
                     usage = _extract_usage(response) or {}
-                    display_response_stats(
-                        console,
-                        prompt_tokens=usage.get("prompt_tokens", 0),
-                        completion_tokens=usage.get("completion_tokens", 0),
-                        total_time=elapsed,
+                    sink.response_stats(
+                        usage.get("prompt_tokens", 0),
+                        usage.get("completion_tokens", 0),
+                        elapsed,
+                        None,
                     )
 
             # Fallback: parse tool calls from text if model didn't use native calling
@@ -177,10 +182,7 @@ async def run_agent(
                 if sig == last_tool_signature:
                     repeat_count += 1
                     if repeat_count >= 1:
-                        display_error(
-                            console,
-                            "Detected repeated tool call — stopping to avoid infinite loop.",
-                        )
+                        sink.error("Detected repeated tool call — stopping to avoid infinite loop.")
                         conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
                         break
                 else:
@@ -195,7 +197,14 @@ async def run_agent(
                     )
                 )
                 await _process_tool_calls(
-                    tool_calls_raw, conversation, registry, config, console, session_approved
+                    tool_calls_raw,
+                    conversation,
+                    registry,
+                    config,
+                    sink,
+                    session_approved,
+                    auto_confirm=auto_confirm,
+                    console=console,
                 )
                 continue
 
@@ -203,33 +212,32 @@ async def run_agent(
             conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
             break
 
-        except KeyboardInterrupt:
-            display_error(console, "[Interrupted]")
-            # Add any partial response as assistant message
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # Ctrl-C surfaces as KeyboardInterrupt under asyncio.run, and as
+            # CancelledError when a turn task is cancelled. Handle both so the
+            # conversation stays valid and session_end hooks still run.
+            sink.error("[Interrupted]")
             if assistant_text:
                 conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
             break
         except (ConnectionError, TimeoutError, OSError) as e:
             _logger.warning("LLM call failed: %s", e, exc_info=True)
-            display_error(console, f"LLM error: {e}")
+            sink.error(f"LLM error: {e}")
             if assistant_text:
                 conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
             break
         except json.JSONDecodeError as e:
             _logger.warning("Failed to parse LLM response: %s", e, exc_info=True)
-            display_error(console, f"Response parse error: {e}")
+            sink.error(f"Response parse error: {e}")
             break
         except Exception as e:  # noqa: BLE001
             _logger.error("Unexpected error in agent loop: %s", e, exc_info=True)
-            display_error(console, f"Unexpected error: {e}")
+            sink.error(f"Unexpected error: {e}")
             if assistant_text:
                 conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
             break
     else:
-        display_error(
-            console,
-            f"Reached maximum iterations ({max_iterations}). Stopping.",
-        )
+        sink.error(f"Reached maximum iterations ({max_iterations}). Stopping.")
 
     # Fire session_end hooks
     if config.hooks:
@@ -259,7 +267,7 @@ async def _stream_response(
     client: LLMClient,
     messages: list[dict[str, Any]],
     tool_schemas: list[dict[str, Any]],
-    console: Console,
+    sink: UISink,
 ) -> tuple[str, list[dict[str, Any]], _ResponseStats]:
     """Stream the LLM response, displaying tokens as they arrive.
 
@@ -273,7 +281,7 @@ async def _stream_response(
     start_time = time.monotonic()
 
     spinner_stack = contextlib.ExitStack()
-    spinner_stack.enter_context(thinking_spinner(console))
+    spinner_stack.enter_context(sink.busy("Thinking..."))
 
     try:
         async for chunk in client.stream_chat(messages, tools=tool_schemas):
@@ -285,7 +293,7 @@ async def _stream_response(
             delta = extract_delta_content(chunk)
             if delta:
                 text_parts.append(delta)
-                display_streaming_token(console, delta)
+                sink.stream_token(delta)
 
             _accumulate_tool_call_deltas(chunk, tool_calls_by_index)
 
@@ -300,7 +308,7 @@ async def _stream_response(
     full_text = "".join(text_parts)
 
     if full_text:
-        display_streaming_end(console)
+        sink.stream_end()
 
     tool_calls_raw = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
     return full_text, tool_calls_raw, stats
@@ -534,10 +542,18 @@ async def _process_tool_calls(
     conversation: Conversation,
     registry: ToolRegistry,
     config: MitaConfig,
-    console: Console,
+    sink: UISink,
     session_approved: set[str] | None = None,
+    auto_confirm: bool = False,
+    console: Console | None = None,
 ) -> None:
-    """Process tool calls from an LLM response."""
+    """Process tool calls from an LLM response.
+
+    Every tool call in ``tool_calls_raw`` is guaranteed a matching TOOL result
+    message, even if the batch is interrupted mid-way. Without that, the assistant
+    message carries tool_calls with no answers and the next request 400s on
+    OpenAI-compatible endpoints.
+    """
     # Import hooks runner once if hooks are configured
     _run_hooks = None
     if config.hooks:
@@ -545,80 +561,107 @@ async def _process_tool_calls(
 
         _run_hooks = run_hooks
 
-    for tc_raw in tool_calls_raw:
-        func = tc_raw.get("function", {})
-        tc_id = tc_raw.get("id", str(uuid.uuid4()))
-        name = func.get("name", "") if isinstance(func, dict) else ""
-        args_raw = func.get("arguments", "{}") if isinstance(func, dict) else "{}"
+    answered: set[str] = set()
+    try:
+        for tc_raw in tool_calls_raw:
+            func = tc_raw.get("function", {})
+            tc_id = tc_raw.get("id", str(uuid.uuid4()))
+            name = func.get("name", "") if isinstance(func, dict) else ""
+            args_raw = func.get("arguments", "{}") if isinstance(func, dict) else "{}"
 
-        # Parse arguments
-        if isinstance(args_raw, str):
-            try:
-                arguments = json.loads(args_raw)
-            except json.JSONDecodeError:
-                arguments = {}
-        else:
-            arguments = args_raw if isinstance(args_raw, dict) else {}
+            # Parse arguments
+            if isinstance(args_raw, str):
+                try:
+                    arguments = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    arguments = {}
+            else:
+                arguments = args_raw if isinstance(args_raw, dict) else {}
 
-        tool_call = ToolCall(id=tc_id, name=name, arguments=arguments)
+            tool_call = ToolCall(id=tc_id, name=name, arguments=arguments)
 
-        # Display the tool call
-        display_tool_call(console, tool_call)
+            # Display the tool call
+            sink.tool_call(tool_call)
 
-        # Fire pre_tool_call hooks
-        if _run_hooks is not None:
-            await _run_hooks(
-                "pre_tool_call",
-                config.hooks,
-                context={"tool": name, "args": arguments},
-                console=console,
-                timeout=config.hook_settings.timeout,
-            )
-
-        # Create confirm function bound to console
-        async def confirm_fn(prompt: str) -> bool:
-            return await prompt_user_confirm(console, prompt)
-
-        # Execute with safety checks
-        result = await execute_tool(
-            tool_call,
-            registry,
-            config.tools,
-            confirm_fn=confirm_fn,
-            session_approved=session_approved,
-        )
-
-        # Display result
-        display_tool_result(console, result)
-
-        # Fire post_tool_call hooks
-        if _run_hooks is not None:
-            await _run_hooks(
-                "post_tool_call",
-                config.hooks,
-                context={"tool": name, "result": str(result.output or result.error)},
-                console=console,
-                timeout=config.hook_settings.timeout,
-            )
-
-        # Fire on_file_write hooks for file_write/file_edit tools
-        if _run_hooks is not None and result.success and name in ("file_write", "file_edit"):
-            file_path = arguments.get("path", "")
-            if file_path:
+            # Fire pre_tool_call hooks
+            if _run_hooks is not None:
                 await _run_hooks(
-                    "on_file_write",
+                    "pre_tool_call",
                     config.hooks,
-                    context={"file_path": file_path},
+                    context={"tool": name, "args": arguments},
                     console=console,
                     timeout=config.hook_settings.timeout,
                 )
 
-        # Add tool result to conversation
-        conversation.add(
-            Message(
-                role=Role.TOOL,
-                content=result.output if result.success else (result.error or "Error"),
-                tool_call_id=tc_id,
-                name=name,
+            # Confirmation: auto-approve when requested, else ask the sink with an
+            # allow-for-session option that adds the tool to session_approved.
+            async def confirm_fn(prompt: str, _name: str = name) -> bool:
+                if auto_confirm:
+                    return True
+                decision = await sink.confirm(ConfirmRequest(tool_name=_name, summary=prompt))
+                if decision == ConfirmDecision.ALLOW_SESSION:
+                    if session_approved is not None:
+                        session_approved.add(_name)
+                    return True
+                return decision == ConfirmDecision.ALLOW_ONCE
+
+            # Execute with safety checks
+            result = await execute_tool(
+                tool_call,
+                registry,
+                config.tools,
+                confirm_fn=confirm_fn,
+                session_approved=session_approved,
             )
-        )
+
+            # Display result
+            sink.tool_result(result)
+
+            # Fire post_tool_call hooks
+            if _run_hooks is not None:
+                await _run_hooks(
+                    "post_tool_call",
+                    config.hooks,
+                    context={"tool": name, "result": str(result.output or result.error)},
+                    console=console,
+                    timeout=config.hook_settings.timeout,
+                )
+
+            # Fire on_file_write hooks for file_write/file_edit tools
+            if _run_hooks is not None and result.success and name in ("file_write", "file_edit"):
+                file_path = arguments.get("path", "")
+                if file_path:
+                    await _run_hooks(
+                        "on_file_write",
+                        config.hooks,
+                        context={"file_path": file_path},
+                        console=console,
+                        timeout=config.hook_settings.timeout,
+                    )
+
+            # Add tool result to conversation
+            conversation.add(
+                Message(
+                    role=Role.TOOL,
+                    content=result.output if result.success else (result.error or "Error"),
+                    tool_call_id=tc_id,
+                    name=name,
+                )
+            )
+            answered.add(tc_id)
+    finally:
+        # Backfill results for any tool calls left unanswered (e.g. interrupt).
+        for tc_raw in tool_calls_raw:
+            tc_id = tc_raw.get("id")
+            if not tc_id or tc_id in answered:
+                continue
+            func = tc_raw.get("function", {})
+            name = func.get("name", "") if isinstance(func, dict) else ""
+            conversation.add(
+                Message(
+                    role=Role.TOOL,
+                    content="Not executed (interrupted).",
+                    tool_call_id=tc_id,
+                    name=name,
+                )
+            )

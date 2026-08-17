@@ -368,87 +368,106 @@ class TestRunAgentExtended:
 
 
 class TestProcessToolCalls:
+    def _sink(self, decision: str = "once") -> object:
+        from mita.ui.sink import ConfirmDecision, RecordingSink
+
+        sink = RecordingSink()
+        sink.confirm_decision = ConfirmDecision(decision)
+        return sink
+
     @pytest.mark.asyncio()
     async def test_processes_tool_call(self) -> None:
         config = MitaConfig()
-        mock_console = MagicMock()
-        mock_console.print = MagicMock()
         conv = Conversation()
         registry = create_default_registry()
-
         tool_calls_raw = [
-            {
-                "id": "tc1",
-                "function": {
-                    "name": "file_read",
-                    "arguments": '{"path": "/tmp/nonexistent"}',
-                },
-            }
+            {"id": "tc1", "function": {"name": "file_read", "arguments": '{"path": "/tmp/none"}'}}
         ]
-
-        with (
-            patch("mita.agent.loop.display_tool_call"),
-            patch("mita.agent.loop.display_tool_result"),
-            patch("mita.agent.loop.prompt_user_confirm", new_callable=AsyncMock, return_value=True),
-        ):
-            await _process_tool_calls(tool_calls_raw, conv, registry, config, mock_console)
-
-        # Tool result should be added to conversation
+        await _process_tool_calls(tool_calls_raw, conv, registry, config, self._sink())
         tool_msgs = [m for m in conv.messages if m.role == Role.TOOL]
         assert len(tool_msgs) == 1
 
     @pytest.mark.asyncio()
     async def test_dict_arguments(self) -> None:
-        """Arguments already parsed as dict should work."""
         config = MitaConfig()
-        mock_console = MagicMock()
         conv = Conversation()
         registry = create_default_registry()
-
         tool_calls_raw = [
-            {
-                "id": "tc1",
-                "function": {
-                    "name": "file_read",
-                    "arguments": {"path": "/tmp/nonexistent"},
-                },
-            }
+            {"id": "tc1", "function": {"name": "file_read", "arguments": {"path": "/tmp/none"}}}
         ]
-
-        with (
-            patch("mita.agent.loop.display_tool_call"),
-            patch("mita.agent.loop.display_tool_result"),
-            patch("mita.agent.loop.prompt_user_confirm", new_callable=AsyncMock, return_value=True),
-        ):
-            await _process_tool_calls(tool_calls_raw, conv, registry, config, mock_console)
-
-        tool_msgs = [m for m in conv.messages if m.role == Role.TOOL]
-        assert len(tool_msgs) == 1
+        await _process_tool_calls(tool_calls_raw, conv, registry, config, self._sink())
+        assert len([m for m in conv.messages if m.role == Role.TOOL]) == 1
 
     @pytest.mark.asyncio()
     async def test_invalid_json_arguments(self) -> None:
-        """Invalid JSON arguments should be handled gracefully."""
         config = MitaConfig()
-        mock_console = MagicMock()
         conv = Conversation()
         registry = create_default_registry()
-
         tool_calls_raw = [
+            {"id": "tc1", "function": {"name": "file_read", "arguments": "not valid json"}}
+        ]
+        await _process_tool_calls(tool_calls_raw, conv, registry, config, self._sink())
+        assert len([m for m in conv.messages if m.role == Role.TOOL]) == 1
+
+
+class TestConfirmationAndInterrupt:
+    """Audit should-fix: allow-for-session, auto_confirm, interrupt backfill."""
+
+    def _destructive_call(self) -> list[dict]:
+        return [
             {
                 "id": "tc1",
-                "function": {
-                    "name": "file_read",
-                    "arguments": "not valid json",
-                },
+                "function": {"name": "shell", "arguments": '{"command": "shred /tmp/x"}'},
             }
         ]
 
-        with (
-            patch("mita.agent.loop.display_tool_call"),
-            patch("mita.agent.loop.display_tool_result"),
-            patch("mita.agent.loop.prompt_user_confirm", new_callable=AsyncMock, return_value=True),
-        ):
-            await _process_tool_calls(tool_calls_raw, conv, registry, config, mock_console)
+    @pytest.mark.asyncio()
+    async def test_always_adds_to_session_approved(self) -> None:
+        from mita.ui.sink import ConfirmDecision, RecordingSink
 
-        tool_msgs = [m for m in conv.messages if m.role == Role.TOOL]
-        assert len(tool_msgs) == 1
+        config = MitaConfig()
+        conv = Conversation()
+        registry = create_default_registry()
+        session: set[str] = set()
+        sink = RecordingSink()
+        sink.confirm_decision = ConfirmDecision.ALLOW_SESSION
+
+        await _process_tool_calls(self._destructive_call(), conv, registry, config, sink, session)
+        assert "shell" in session
+
+    @pytest.mark.asyncio()
+    async def test_auto_confirm_skips_prompt(self) -> None:
+        from mita.ui.sink import RecordingSink
+
+        config = MitaConfig()
+        conv = Conversation()
+        registry = create_default_registry()
+        sink = RecordingSink()  # default decision is DENY
+
+        await _process_tool_calls(
+            self._destructive_call(), conv, registry, config, sink, None, auto_confirm=True
+        )
+        # auto_confirm means the sink is never asked to confirm.
+        assert not any(kind == "confirm" for kind, _ in sink.events)
+
+    @pytest.mark.asyncio()
+    async def test_interrupt_backfills_tool_results(self) -> None:
+        """If a tool call raises mid-batch, every tool_call still gets a TOOL result."""
+        from mita.ui.sink import RecordingSink
+
+        config = MitaConfig()
+        conv = Conversation()
+        registry = create_default_registry()
+        calls = [
+            {"id": "tc1", "function": {"name": "file_read", "arguments": '{"path": "/tmp/none"}'}},
+            {"id": "tc2", "function": {"name": "file_read", "arguments": '{"path": "/tmp/none2"}'}},
+        ]
+
+        with patch(
+            "mita.agent.loop.execute_tool", new_callable=AsyncMock, side_effect=KeyboardInterrupt
+        ):
+            with pytest.raises(KeyboardInterrupt):
+                await _process_tool_calls(calls, conv, registry, config, RecordingSink())
+
+        tool_ids = {m.tool_call_id for m in conv.messages if m.role == Role.TOOL}
+        assert tool_ids == {"tc1", "tc2"}

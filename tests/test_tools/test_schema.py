@@ -59,3 +59,43 @@ class TestToolResult:
         tr = ToolResult(tool_call_id="1", success=False, error="fail")
         assert tr.error == "fail"
         assert tr.success is False
+
+
+class TestMCPSchemaPreservation:
+    """Audit finding F4.1: full JSON Schema (enum/items/nested) survives to OpenAI schema."""
+
+    def test_enum_and_items_preserved(self) -> None:
+        from mita.tools.schema import ToolDefinition, ToolParameter
+
+        defn = ToolDefinition(
+            name="mcp_x_do",
+            description="do",
+            parameters=[
+                ToolParameter(
+                    name="mode",
+                    type="string",
+                    description="mode",
+                    json_schema={"type": "string", "enum": ["a", "b"], "description": "mode"},
+                ),
+                ToolParameter(
+                    name="tags",
+                    type="array",
+                    description="tags",
+                    json_schema={"type": "array", "items": {"type": "string"}},
+                ),
+            ],
+        )
+        props = defn.to_openai_schema()["function"]["parameters"]["properties"]
+        assert props["mode"]["enum"] == ["a", "b"]
+        assert props["tags"]["items"] == {"type": "string"}
+
+    def test_builtin_param_still_flat(self) -> None:
+        from mita.tools.schema import ToolDefinition, ToolParameter
+
+        defn = ToolDefinition(
+            name="file_read",
+            description="read",
+            parameters=[ToolParameter(name="path", type="string", description="path")],
+        )
+        props = defn.to_openai_schema()["function"]["parameters"]["properties"]
+        assert props["path"] == {"type": "string", "description": "path"}

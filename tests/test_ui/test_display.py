@@ -112,3 +112,27 @@ class TestPromptUserConfirm:
         console.print = MagicMock()
         result = await prompt_user_confirm(console, "Allow?")
         assert result is False
+
+
+class TestMarkupInjection:
+    """Audit finding: model/tool output containing '[/x]' must not crash rendering."""
+
+    def test_tool_result_output_with_markup(self) -> None:
+        console = Console(force_terminal=True, width=80, theme=MITA_THEME)
+        result = ToolResult(tool_call_id="1", success=True, output="see [/dim] and [bold]x")
+        display_tool_result(console, result)  # must not raise MarkupError
+
+    def test_tool_result_error_with_markup(self) -> None:
+        console = Console(force_terminal=True, width=80, theme=MITA_THEME)
+        result = ToolResult(tool_call_id="1", success=False, error="bad [/red] token")
+        display_tool_result(console, result)
+
+    def test_tool_call_args_with_markup(self) -> None:
+        console = Console(force_terminal=True, width=80, theme=MITA_THEME)
+        call = ToolCall(id="1", name="mcp:srv/do", arguments={"pattern": "[/x]abc["})
+        display_tool_call(console, call)
+
+    def test_error_and_warning_with_markup(self) -> None:
+        console = Console(force_terminal=True, width=80, theme=MITA_THEME)
+        display_error(console, "failed on [/tag]")
+        display_warning(console, "watch [/out]")

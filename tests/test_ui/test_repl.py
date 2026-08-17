@@ -208,3 +208,37 @@ class TestTryRenderSkill:
         ):
             result = _try_render_skill("/test-skill", ["/path"], console)
             assert result == "rendered output"
+
+
+class TestReloadAndHelp:
+    """Audit finding S7: /reload re-reads config/memory without a restart."""
+
+    @pytest.mark.asyncio()
+    async def test_reload_command(self) -> None:
+        console = MagicMock()
+        on_input = AsyncMock()
+        on_reload = MagicMock()
+
+        with patch("mita.ui.repl.PromptSession") as mock_session_cls:
+            session = MagicMock()
+            session.prompt_async = AsyncMock(side_effect=["/reload", "/quit"])
+            mock_session_cls.return_value = session
+            with patch("mita.ui.repl.display_welcome"), patch("mita.ui.repl.display_goodbye"):
+                await repl_loop(console, on_input, on_reload=on_reload)
+
+        on_reload.assert_called_once()
+        on_input.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_help_command(self) -> None:
+        console = MagicMock()
+        on_input = AsyncMock()
+
+        with patch("mita.ui.repl.PromptSession") as mock_session_cls:
+            session = MagicMock()
+            session.prompt_async = AsyncMock(side_effect=["/help", "/quit"])
+            mock_session_cls.return_value = session
+            with patch("mita.ui.repl.display_welcome"), patch("mita.ui.repl.display_goodbye"):
+                await repl_loop(console, on_input)
+
+        on_input.assert_not_called()

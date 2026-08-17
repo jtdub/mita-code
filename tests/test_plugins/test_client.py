@@ -50,12 +50,52 @@ class TestMCPPluginClient:
         with pytest.raises(ValueError, match="requires a url"):
             await client.connect()
 
+    def test_unsupported_transport_rejected_at_construction(self) -> None:
+        # The transport is validated at config-parse time now (finding F2.4).
+        with pytest.raises(ValueError, match="transport must be"):
+            PluginDefinition(name="bad", transport="grpc")
+
     @pytest.mark.asyncio
-    async def test_unsupported_transport_raises(self) -> None:
-        plugin = PluginDefinition(name="bad", transport="grpc")
+    async def test_missing_url_streamable_http_raises(self) -> None:
+        plugin = PluginDefinition(name="bad", transport="streamable_http")
         client = MCPPluginClient(plugin)
-        with pytest.raises(ValueError, match="Unsupported transport"):
+        with pytest.raises(ValueError, match="requires a url"):
             await client.connect()
+
+    def test_headers_expand_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MCP_TOKEN", "tok-123")
+        plugin = PluginDefinition(
+            name="web",
+            transport="streamable_http",
+            url="https://example.com/mcp",
+            headers={"Authorization": "Bearer ${MCP_TOKEN}"},
+        )
+        assert plugin.headers["Authorization"] == "Bearer tok-123"
+
+    @pytest.mark.asyncio
+    async def test_connect_streamable_http(self) -> None:
+        plugin = PluginDefinition(
+            name="web", transport="streamable_http", url="https://example.com/mcp"
+        )
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        # Streamable HTTP yields a 3-tuple (read, write, get_session_id).
+        mock_transport = (MagicMock(), MagicMock(), MagicMock())
+        with (
+            patch("mcp.client.streamable_http.streamablehttp_client") as mock_http,
+            patch("mita.plugins.client.ClientSession", return_value=mock_session),
+        ):
+            mock_cm = MagicMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_transport)
+            mock_cm.__aexit__ = AsyncMock(return_value=None)
+            mock_http.return_value = mock_cm
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+
+            client = MCPPluginClient(plugin)
+            await client.connect()
+            assert client.connected
+            mock_session.initialize.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_list_tools_not_connected(self, stdio_plugin: PluginDefinition) -> None:
@@ -135,6 +175,22 @@ class TestMCPPluginClient:
         output = await client.call_tool("read_file", {"path": "/tmp/test.txt"})
         assert output == "file contents here"
         client._session.call_tool.assert_awaited_once_with("read_file", {"path": "/tmp/test.txt"})
+
+    @pytest.mark.asyncio
+    async def test_call_tool_is_error_raises(self, stdio_plugin: PluginDefinition) -> None:
+        """A result with isError=True must not be reported as success."""
+        mock_content = MagicMock()
+        mock_content.text = "tool exploded"
+        mock_result = MagicMock()
+        mock_result.content = [mock_content]
+        mock_result.isError = True
+
+        client = MCPPluginClient(stdio_plugin)
+        client._session = AsyncMock()
+        client._session.call_tool = AsyncMock(return_value=mock_result)
+
+        with pytest.raises(RuntimeError, match="tool exploded"):
+            await client.call_tool("boom", {})
 
     @pytest.mark.asyncio
     async def test_disconnect(self, stdio_plugin: PluginDefinition) -> None:

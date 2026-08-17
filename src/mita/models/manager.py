@@ -24,7 +24,17 @@ def _get_client() -> tuple[OllamaClient, MitaConfig]:
 
 
 def _check_ollama(client: OllamaClient, cfg: MitaConfig) -> bool:
-    """Check if Ollama is running, auto-start if configured."""
+    """Check the provider is Ollama and its server is running (auto-start if configured)."""
+    from mita.config.schema import LLMProvider
+
+    if cfg.llm.provider != LLMProvider.OLLAMA:
+        console.print(
+            f"[yellow]Model management commands are Ollama-only. The configured provider "
+            f"is '{cfg.llm.provider.value}', which has no model registry — manage models "
+            f"on that server directly.[/yellow]"
+        )
+        return False
+
     if client.is_running():
         return True
 

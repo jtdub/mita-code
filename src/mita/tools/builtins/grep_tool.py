@@ -59,7 +59,11 @@ async def execute(args: dict[str, Any]) -> ToolResult:
 
     target = Path(path_str).expanduser().resolve()
 
-    from mita.tools.safety import validate_path_for_read, validate_search_base
+    from mita.tools.safety import (
+        validate_glob_pattern,
+        validate_path_for_read,
+        validate_search_base,
+    )
 
     if target.is_file():
         read_error = validate_path_for_read(target)
@@ -73,6 +77,10 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     if target.is_file():
         files = [target]
     elif target.is_dir():
+        if include:
+            include_error = validate_glob_pattern(str(include))
+            if include_error:
+                return ToolResult(tool_call_id="", success=False, error=include_error)
         glob_pattern = str(include) if include else "**/*"
         files = sorted(f for f in target.glob(glob_pattern) if f.is_file())
     else:
@@ -82,6 +90,10 @@ async def execute(args: dict[str, Any]) -> ToolResult:
     match_count = 0
 
     for file_path in files:
+        # Re-validate every expanded path before reading. The include glob or an
+        # in-tree symlink can resolve outside the workspace; skip those silently.
+        if validate_path_for_read(file_path.resolve()) is not None:
+            continue
         try:
             text = file_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
