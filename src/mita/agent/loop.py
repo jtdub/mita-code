@@ -182,9 +182,7 @@ async def run_agent(
                 if sig == last_tool_signature:
                     repeat_count += 1
                     if repeat_count >= 1:
-                        sink.error(
-                            "Detected repeated tool call — stopping to avoid infinite loop."
-                        )
+                        sink.error("Detected repeated tool call — stopping to avoid infinite loop.")
                         conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
                         break
                 else:
