@@ -39,6 +39,60 @@ class TestChatPermissionFlag:
         assert "permission" in result.output.lower()
 
 
+class TestChatResumeFlag:
+    def test_chat_help_shows_resume_flag(self) -> None:
+        result = runner.invoke(app, ["chat", "--help"])
+        assert result.exit_code == 0
+        assert "resume" in result.output.lower()
+        assert "continue" in result.output.lower()
+
+
+# ── Sessions commands ────────────────────────────────────────────
+
+
+class TestSessionsCommands:
+    def test_sessions_list_empty(self) -> None:
+        result = runner.invoke(app, ["sessions", "list"])
+        assert result.exit_code == 0
+        assert "No saved sessions" in result.output
+
+    def test_sessions_clear_empty(self) -> None:
+        result = runner.invoke(app, ["sessions", "clear", "--yes"])
+        assert result.exit_code == 0
+        assert "No saved sessions" in result.output
+
+    def test_sessions_list_and_clear_with_session(self) -> None:
+        import time
+
+        from mita.agent.conversation import Conversation, Message, Role
+        from mita.sessions import get_sessions_dir
+        from mita.sessions.store import SessionRecord, SessionStore
+
+        conv = Conversation()
+        conv.add(Message(role=Role.USER, content="hello session"))
+        store = SessionStore(get_sessions_dir())
+        store.save(
+            SessionRecord.from_conversation(
+                conv,
+                session_id="s1",
+                title="hello session",
+                cwd=str(Path.cwd()),
+                model="test-model",
+                created_at=time.time(),
+            )
+        )
+
+        result = runner.invoke(app, ["sessions", "list"])
+        assert result.exit_code == 0
+        assert "s1" in result.output
+        assert "hello session" in result.output
+
+        result = runner.invoke(app, ["sessions", "clear", "--yes"])
+        assert result.exit_code == 0
+        assert "Deleted 1" in result.output
+        assert store.list_metas() == []
+
+
 # ── Config commands ──────────────────────────────────────────────
 
 

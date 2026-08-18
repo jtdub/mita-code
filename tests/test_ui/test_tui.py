@@ -5,14 +5,19 @@ from __future__ import annotations
 import pytest
 
 from mita.config.schema import MitaConfig
+from mita.sessions import get_sessions_dir
+from mita.sessions.store import SessionStore
+from mita.sessions.tracker import SessionTracker
 from mita.tools.registry import create_default_registry
 from mita.tools.schema import ToolCall, ToolResult
 from mita.ui.sink import ConfirmDecision, ConfirmRequest, UISink
-from mita.ui.tui.app import ConfirmScreen, MitaTUI
+from mita.ui.tui.app import ConfirmScreen, MitaTUI, SessionPickerScreen
 
 
-def _app() -> MitaTUI:
-    return MitaTUI(MitaConfig(), create_default_registry())
+def _app(**kwargs) -> MitaTUI:  # type: ignore[no-untyped-def]
+    config = MitaConfig()
+    tracker = SessionTracker(SessionStore(get_sessions_dir()), config)
+    return MitaTUI(config, create_default_registry(), tracker=tracker, **kwargs)
 
 
 def test_app_is_a_uisink() -> None:
@@ -70,3 +75,108 @@ class TestTUIRuntime:
             await pilot.pause()
             result = await task.wait()
         assert result is ConfirmDecision.ALLOW_SESSION
+
+
+class TestTUISessions:
+    def _record(self):  # type: ignore[no-untyped-def]
+        import time
+
+        from mita.agent.conversation import Conversation, Message, Role
+        from mita.sessions.store import SessionRecord
+
+        conv = Conversation()
+        conv.add(Message(role=Role.USER, content="hello"))
+        conv.add(Message(role=Role.ASSISTANT, content="hi"))
+        return SessionRecord.from_conversation(
+            conv,
+            session_id="tui-test-session",
+            title="hello",
+            cwd="/elsewhere",
+            model="test-model",
+            created_at=time.time(),
+        )
+
+    @pytest.mark.asyncio()
+    async def test_resume_record_seeds_conversation(self) -> None:
+        record = self._record()
+        app = _app(resume_record=record)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app._mita_conversation is not None
+            contents = [m.content for m in app._mita_conversation.messages]
+            assert "hello" in contents
+            assert "hi" in contents
+            assert app._mita_tracker.session_id == "tui-test-session"
+
+    @pytest.mark.asyncio()
+    async def test_resume_command_with_no_sessions(self) -> None:
+        app = _app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            prompt.value = "/resume"
+            await pilot.press("enter")
+            await pilot.pause()
+            # No saved sessions: the app stays running and no picker is shown.
+            assert app.is_running is True
+            assert app._mita_conversation is None
+
+    @pytest.mark.asyncio()
+    async def test_resume_command_with_id_loads_session(self) -> None:
+        record = self._record()
+        SessionStore(get_sessions_dir()).save(record)
+
+        app = _app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            prompt.value = "/resume tui-test-session"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._mita_conversation is not None
+            assert app._mita_tracker.session_id == "tui-test-session"
+
+
+class TestTUIResumePicker:
+    @pytest.mark.asyncio()
+    async def test_resume_picker_opens_without_crashing(self) -> None:
+        """Regression: push_screen_wait needs a worker, else NoActiveWorker kills the app."""
+        from mita.agent.conversation import Conversation, Message, Role
+        from mita.sessions.store import SessionRecord
+
+        conv = Conversation()
+        conv.add(Message(role=Role.USER, content="hello"))
+        SessionStore(get_sessions_dir()).save(
+            SessionRecord.from_conversation(
+                conv,
+                session_id="picker-session",
+                title="hello",
+                cwd="/elsewhere",
+                model="m",
+                created_at=1.0,
+            )
+        )
+
+        app = _app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            prompt.value = "/resume"
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+            assert app.is_running is True
+            # The picker modal is up and lists the saved session.
+            assert isinstance(app.screen, SessionPickerScreen)
+
+    @pytest.mark.asyncio()
+    async def test_clear_starts_a_new_session(self) -> None:
+        app = _app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            original = app._mita_tracker.session_id
+            prompt = app.query_one("#prompt")
+            prompt.value = "/clear"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._mita_tracker.session_id != original

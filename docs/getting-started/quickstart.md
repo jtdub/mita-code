@@ -22,6 +22,7 @@ mita> /commit
 |---|---|
 | `/quit`, `/exit`, `/q` | Exit the session |
 | `/clear` | Clear conversation history |
+| `/resume [id]` | Resume a saved session (no id lists recent sessions) |
 | `/<skill>` | Invoke a skill (e.g., `/commit`, `/review`) |
 
 ## Single-Shot Prompts

@@ -45,6 +45,9 @@ Think "Claude Code but 100% local."
 
 6. **Index stored in `.mita/index/`** (gitignored) — not in a global cache.
 
+7. **Chat sessions stored in `.mita/sessions/`** (gitignored) — one JSON file per session,
+   non-system messages only; the system prompt is regenerated on resume.
+
 ## Coding Standards
 
 - **Package manager**: Poetry
@@ -68,10 +71,11 @@ Think "Claude Code but 100% local."
 - `tools` depends on `config`, `ui`
 - `index` depends on `config`, `llm`
 - `skills` depends on `config`
+- `sessions` depends on `config` (plus the `agent` conversation/context modules; `agent` must never import `sessions`)
 - `plugins` depends on `config`, `tools`
 - `hooks` depends on `config`
 - `agent` depends on everything (it's the orchestrator)
-- `ui` depends on `config`
+- `ui` depends on `config` (the TUI frontend additionally uses `agent` conversation models, `tools` schemas, and `sessions`)
 - `cli` depends on everything (it's the entry point)
 
 **No circular dependencies.** If module A imports from module B, module B must not import from A.

@@ -5,6 +5,8 @@
 | Command | Description |
 |---|---|
 | `mita chat` | Open an interactive chat session |
+| `mita chat --resume <id>` | Resume a saved session (`latest` resumes the most recent) |
+| `mita chat --continue` / `-c` | Resume the most recent saved session |
 | `mita ask <prompt>` | Send a single prompt (non-interactive) |
 | `mita --version` | Show version |
 
@@ -44,6 +46,16 @@
 | `mita index status` | Show index statistics |
 | `mita index search <query> [--top-k N]` | Search the index |
 | `mita index clear` | Delete the index |
+
+## Sessions
+
+Chat sessions are saved to `.mita/sessions/` after each turn (see `[sessions]` in the
+configuration reference). Sessions older than `max_age_days` are pruned when a chat starts.
+
+| Command | Description |
+|---|---|
+| `mita sessions list` | List saved chat sessions |
+| `mita sessions clear [--yes]` | Delete all saved chat sessions |
 
 ## Skills
 

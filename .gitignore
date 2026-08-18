@@ -190,6 +190,7 @@ cython_debug/
 
 # Mita Code
 .mita/index/
+.mita/sessions/
 
 # Ruff stuff:
 .ruff_cache/

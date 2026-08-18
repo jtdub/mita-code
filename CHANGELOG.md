@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Session persistence**: chat sessions auto-save to `.mita/sessions/` after each turn.
+  Resume with `mita chat --resume <id>` (or `--continue` for the most recent), or with
+  the `/resume` command in the REPL and the TUI. Manage saved sessions with
+  `mita sessions list` and `mita sessions clear`. Sessions older than
+  `sessions.max_age_days` (default 7) are pruned at chat start; configure via the new
+  `[sessions]` config section (`autosave`, `max_age_days`).
+
 ## [0.1.0] - 2026-03-09
 
 ### Added

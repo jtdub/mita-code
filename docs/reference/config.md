@@ -63,6 +63,13 @@ exclude_patterns = [
 | `stream` | bool | `true` | Stream responses token-by-token |
 | `markdown` | bool | `true` | Render Markdown in responses |
 
+## `[sessions]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `autosave` | bool | `true` | Save the chat session after each turn |
+| `max_age_days` | int | `7` | Delete sessions with no activity for this many days (`0` disables pruning) |
+
 ## `skills_paths`
 
 | Key | Type | Default | Description |

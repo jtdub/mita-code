@@ -322,6 +322,20 @@ class UISettings(BaseModel):
     markdown: bool = True
 
 
+class SessionSettings(BaseModel):
+    """Chat session persistence settings."""
+
+    autosave: bool = True
+    max_age_days: int = 7  # 0 disables pruning
+
+    @field_validator("max_age_days")
+    @classmethod
+    def max_age_days_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("max_age_days must be >= 0")
+        return v
+
+
 class MitaConfig(BaseModel):
     """Root configuration model — result of merging global + project TOML."""
 
@@ -332,6 +346,7 @@ class MitaConfig(BaseModel):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     index: IndexSettings = Field(default_factory=IndexSettings)
     ui: UISettings = Field(default_factory=UISettings)
+    sessions: SessionSettings = Field(default_factory=SessionSettings)
     hook_settings: HookSettings = Field(default_factory=HookSettings)
     max_iterations: int = 25
     hooks: list[HookDefinition] = Field(default_factory=list)
