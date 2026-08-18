@@ -242,3 +242,74 @@ class TestReloadAndHelp:
                 await repl_loop(console, on_input)
 
         on_input.assert_not_called()
+
+
+class TestResumeCommand:
+    @pytest.mark.asyncio()
+    async def test_resume_without_arg(self) -> None:
+        """/resume with no argument calls on_resume with an empty string."""
+        console = MagicMock()
+        on_input = AsyncMock()
+        on_resume = AsyncMock()
+
+        with patch("mita.ui.repl.PromptSession") as mock_session_cls:
+            session = MagicMock()
+            session.prompt_async = AsyncMock(side_effect=["/resume", "/quit"])
+            mock_session_cls.return_value = session
+            with patch("mita.ui.repl.display_welcome"), patch("mita.ui.repl.display_goodbye"):
+                await repl_loop(console, on_input, on_resume=on_resume)
+
+        on_resume.assert_awaited_once_with("")
+        on_input.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_resume_with_id(self) -> None:
+        """/resume <id> passes the id to on_resume and is not routed to a skill."""
+        console = MagicMock()
+        on_input = AsyncMock()
+        on_resume = AsyncMock()
+
+        with patch("mita.ui.repl.PromptSession") as mock_session_cls:
+            session = MagicMock()
+            session.prompt_async = AsyncMock(side_effect=["/resume abc123", "/quit"])
+            mock_session_cls.return_value = session
+            with (
+                patch("mita.ui.repl.display_welcome"),
+                patch("mita.ui.repl.display_goodbye"),
+                patch("mita.ui.repl._try_render_skill") as mock_skill,
+            ):
+                await repl_loop(console, on_input, on_resume=on_resume)
+
+        on_resume.assert_awaited_once_with("abc123")
+        mock_skill.assert_not_called()
+        on_input.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_resume_without_callback(self) -> None:
+        """/resume without on_resume prints a notice and continues."""
+        console = MagicMock()
+        on_input = AsyncMock()
+
+        with patch("mita.ui.repl.PromptSession") as mock_session_cls:
+            session = MagicMock()
+            session.prompt_async = AsyncMock(side_effect=["/resume", "/quit"])
+            mock_session_cls.return_value = session
+            with patch("mita.ui.repl.display_welcome"), patch("mita.ui.repl.display_goodbye"):
+                await repl_loop(console, on_input)
+
+        on_input.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_help_mentions_resume(self) -> None:
+        console = MagicMock()
+        on_input = AsyncMock()
+
+        with patch("mita.ui.repl.PromptSession") as mock_session_cls:
+            session = MagicMock()
+            session.prompt_async = AsyncMock(side_effect=["/help", "/quit"])
+            mock_session_cls.return_value = session
+            with patch("mita.ui.repl.display_welcome"), patch("mita.ui.repl.display_goodbye"):
+                await repl_loop(console, on_input)
+
+        help_text = " ".join(str(c) for c in console.print.call_args_list)
+        assert "/resume" in help_text

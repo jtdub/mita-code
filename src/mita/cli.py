@@ -365,6 +365,33 @@ def index_clear() -> None:
     asyncio.run(clear_index())
 
 
+# ── Session commands ──────────────────────────────────────────────
+
+sessions_app = typer.Typer(help="Chat session management.")
+app.add_typer(sessions_app, name="sessions")
+
+
+@sessions_app.command("list")
+def sessions_list() -> None:
+    """List saved chat sessions."""
+    from mita.sessions.manager import list_sessions_command
+
+    list_sessions_command()
+
+
+@sessions_app.command("clear")
+def sessions_clear(
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Delete without confirmation."),
+    ] = False,
+) -> None:
+    """Delete all saved chat sessions."""
+    from mita.sessions.manager import clear_sessions_command
+
+    clear_sessions_command(yes=yes)
+
+
 # ── Skills commands ───────────────────────────────────────────────
 
 skills_app = typer.Typer(help="Skills management.")
@@ -717,6 +744,17 @@ def chat_command(
         bool,
         typer.Option("--tui", help="Launch the full-screen Textual TUI (built-in tools only)."),
     ] = False,
+    resume: Annotated[
+        str | None,
+        typer.Option(
+            "--resume",
+            help="Resume a saved session by id ('latest' resumes the most recent).",
+        ),
+    ] = None,
+    continue_: Annotated[
+        bool,
+        typer.Option("--continue", "-c", help="Resume the most recent saved session."),
+    ] = False,
 ) -> None:
     """Open an interactive chat session with the agent."""
     import asyncio
@@ -724,6 +762,10 @@ def chat_command(
     from mita.agent.conversation import Conversation
     from mita.agent.loop import run_agent
     from mita.config.schema import PermissionMode
+    from mita.sessions import get_sessions_dir
+    from mita.sessions.manager import pick_session
+    from mita.sessions.store import LATEST, SessionRecord, SessionStore, SessionStoreError
+    from mita.sessions.tracker import SessionTracker
     from mita.tools.registry import ToolRegistry, create_default_registry
     from mita.ui.display import get_console
     from mita.ui.repl import repl_loop
@@ -746,19 +788,53 @@ def chat_command(
 
     _warn_if_index_stale(cfg, chat_console)
 
+    store = SessionStore(get_sessions_dir())
+    tracker = SessionTracker(store, cfg)
+
+    if resume is None and continue_:
+        resume = LATEST
+
+    # Load the requested session BEFORE pruning: an explicitly named session must
+    # never be deleted by the retention sweep in the same command that asks for it.
+    resume_record: SessionRecord | None = None
+    if resume is not None:
+        try:
+            resume_record = store.load(store.resolve(resume))
+        except SessionStoreError as e:
+            chat_console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1)
+
+    pruned = store.prune(cfg.sessions.max_age_days)
+    if pruned:
+        chat_console.print(f"[dim]Pruned {pruned} old session(s).[/dim]")
+
     if tui:
         # Textual TUI path. MCP plugins are not auto-started here (their sessions are
         # bound to the loop that creates them); use `mita chat` for MCP-backed tools.
         from mita.ui.tui.app import run_tui
 
         tui_registry = ToolRegistry() if no_tools else create_default_registry()
-        run_tui(cfg, tui_registry, session_approved=set())
+        run_tui(
+            cfg,
+            tui_registry,
+            session_approved=set(),
+            tracker=tracker,
+            resume_record=resume_record,
+        )
         return
 
     from mita.plugins.manager import PluginManager
 
-    conversation = Conversation()
     registry: ToolRegistry = ToolRegistry() if no_tools else create_default_registry()
+
+    def _adopt(record: SessionRecord) -> Conversation:
+        if warning := tracker.cwd_warning(record):
+            chat_console.print(f"[yellow]{warning}[/yellow]")
+        adopted, banner = tracker.adopt(record, registry)
+        chat_console.print(f"[green]{banner}[/green]")
+        return adopted
+
+    conversation = Conversation()
     # Tools the user approved "always" persist for the whole chat session.
     session_approved: set[str] = set()
 
@@ -772,6 +848,15 @@ def chat_command(
             await plugin_mgr.start_all(console=chat_console)
             await plugin_mgr.register_tools(registry)
 
+        # Build the system prompt only once every tool is registered, so MCP tools
+        # appear in it. run_agent skips assembly when a conversation is passed in.
+        from mita.agent.context import assemble_context as _assemble
+
+        if resume_record is None:
+            _assemble(conversation, cfg, registry)
+        else:
+            conversation = _adopt(resume_record)
+
         try:
 
             async def on_input(user_input: str) -> None:
@@ -784,10 +869,29 @@ def chat_command(
                     registry=registry,
                     session_approved=session_approved,
                 )
+                if cfg.sessions.autosave:
+                    if error := tracker.save(conversation, user_input):
+                        chat_console.print(f"[yellow]{error}[/yellow]")
+
+            async def on_resume(arg: str) -> None:
+                nonlocal conversation
+
+                target = arg or pick_session(store, chat_console)
+                if not target:
+                    return
+                try:
+                    record = store.load(store.resolve(target))
+                except SessionStoreError as e:
+                    chat_console.print(f"[red]{e}[/red]")
+                    return
+                conversation = _adopt(record)
 
             def on_clear() -> None:
                 nonlocal conversation
                 conversation.clear_non_system()
+                # Start a new session file; the cleared history must not overwrite
+                # the session that was just resumed.
+                tracker.reset()
 
             def on_reload() -> None:
                 # Re-read config + memory and rebuild the system prompt in place, keeping
@@ -803,6 +907,7 @@ def chat_command(
                 except ConfigError as e:
                     chat_console.print(f"[red]Reload failed (keeping old config): {e}[/red]")
                     return
+                tracker.config = cfg
                 fresh = Conversation()
                 assemble_context(fresh, cfg, registry)
                 non_system = [m for m in conversation.messages if m.role != Role.SYSTEM]
@@ -814,6 +919,7 @@ def chat_command(
                 on_clear=on_clear,
                 skills_paths=cfg.skills_paths,
                 on_reload=on_reload,
+                on_resume=on_resume,
             )
         finally:
             if plugin_mgr is not None:

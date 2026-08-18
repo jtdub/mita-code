@@ -12,7 +12,7 @@ from rich.console import Console
 from mita.ui.display import display_goodbye, display_welcome
 
 # Built-in REPL commands that should NOT be treated as skill invocations.
-_BUILTIN_COMMANDS = frozenset({"/quit", "/exit", "/q", "/clear", "/reload", "/help"})
+_BUILTIN_COMMANDS = frozenset({"/quit", "/exit", "/q", "/clear", "/reload", "/help", "/resume"})
 
 
 async def repl_loop(
@@ -21,6 +21,7 @@ async def repl_loop(
     on_clear: Callable[[], None] | None = None,
     skills_paths: list[str] | None = None,
     on_reload: Callable[[], None] | None = None,
+    on_resume: Callable[[str], Coroutine[Any, Any, None]] | None = None,
 ) -> None:
     """Run the interactive REPL.
 
@@ -30,6 +31,8 @@ async def repl_loop(
         on_clear: Callback invoked when the user types /clear.
         skills_paths: Skill search paths for ``/`` prefix invocation.
         on_reload: Callback invoked when the user types /reload (re-read memory/config).
+        on_resume: Async callback invoked when the user types /resume [session_id];
+            receives the session id or an empty string.
     """
     display_welcome(console)
 
@@ -46,32 +49,41 @@ async def repl_loop(
         if not user_input:
             continue
 
-        if user_input.lower() in ("/quit", "/exit", "/q"):
+        # Parse once: builtin commands dispatch on the first word.
+        cmd, _, arg = user_input.partition(" ")
+        cmd = cmd.lower()
+
+        if cmd in ("/quit", "/exit", "/q"):
             display_goodbye(console)
             break
 
-        if user_input.lower() == "/help":
+        if cmd == "/help":
             console.print(
                 "[mita.dim]Commands: /clear (reset conversation), /reload (re-read "
-                "memory + config), /quit. Anything else is sent to the agent; "
-                "/<name> runs a skill.[/mita.dim]"
+                "memory + config), /resume [id] (resume a saved session), /quit. "
+                "Anything else is sent to the agent; /<name> runs a skill.[/mita.dim]"
             )
             continue
 
-        if user_input.lower() == "/clear":
+        if cmd == "/clear":
             if on_clear is not None:
                 on_clear()
             console.print("[mita.dim]Conversation cleared.[/mita.dim]")
             continue
 
-        if user_input.lower() == "/reload":
+        if cmd == "/reload":
             if on_reload is not None:
                 on_reload()
             console.print("[mita.dim]Reloaded memory and config.[/mita.dim]")
             continue
 
+        if cmd == "/resume":
+            if on_resume is not None:
+                await on_resume(arg.strip())
+            continue
+
         # Skill invocation: /name [args]
-        if user_input.startswith("/") and user_input.split()[0].lower() not in _BUILTIN_COMMANDS:
+        if cmd.startswith("/") and cmd not in _BUILTIN_COMMANDS:
             rendered = _try_render_skill(user_input, skills_paths or [], console)
             if rendered is not None:
                 try:

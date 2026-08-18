@@ -12,14 +12,18 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Label, RichLog
+from textual.widgets import Button, Footer, Header, Input, Label, OptionList, RichLog
+from textual.widgets.option_list import Option
 
 from mita.agent.conversation import Conversation
+from mita.sessions.store import SessionStoreError
+from mita.sessions.tracker import SessionTracker
 from mita.tools.schema import ToolCall, ToolResult
 from mita.ui.sink import AbstractBusy, ConfirmDecision, ConfirmRequest
 
 if TYPE_CHECKING:
     from mita.config.schema import MitaConfig
+    from mita.sessions.store import SessionMeta, SessionRecord
     from mita.tools.registry import ToolRegistry
 
 # NOTE: instance attributes are prefixed `_mita_` because Textual's App reserves several
@@ -49,6 +53,32 @@ class ConfirmScreen(ModalScreen[ConfirmDecision]):
         self.dismiss(mapping.get(event.button.id or "deny", ConfirmDecision.DENY))
 
 
+class SessionPickerScreen(ModalScreen[str | None]):
+    """Modal listing recent sessions; dismisses with the chosen session id or None."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, metas: list[SessionMeta]) -> None:
+        super().__init__()
+        self._metas = metas
+
+    def compose(self) -> ComposeResult:
+        yield Label("Resume a session (Esc to cancel)", id="picker-title")
+        yield OptionList(
+            *[
+                Option(f"{m.id}  {m.title or '(untitled)'}  [{m.message_count} msgs]", id=m.id)
+                for m in self._metas
+            ],
+            id="picker-list",
+        )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class MitaTUI(App[None]):
     """Full-screen chat TUI. Implements the UISink protocol the agent loop calls."""
 
@@ -68,6 +98,9 @@ class MitaTUI(App[None]):
         config: MitaConfig,
         registry: ToolRegistry,
         session_approved: set[str] | None = None,
+        *,
+        tracker: SessionTracker,
+        resume_record: SessionRecord | None = None,
     ) -> None:
         super().__init__()
         self._mita_config = config
@@ -76,16 +109,27 @@ class MitaTUI(App[None]):
         self._mita_conversation: Conversation | None = None
         self._mita_stream_buffer: list[str] = []
         self._mita_hooks_console = Console(quiet=True)
+        self._mita_tracker = tracker
+        self._mita_pending_record = resume_record
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield RichLog(id="log", wrap=True, markup=False, highlight=False)
-        yield Input(placeholder="Ask mita…  (/quit, /clear)", id="prompt")
+        yield Input(placeholder="Ask mita…  (/quit, /clear, /resume)", id="prompt")
         yield Footer()
 
     def on_mount(self) -> None:
         self._out.write(Text("mita — local-first coding assistant. Type a prompt to begin.", "dim"))
+        if self._mita_pending_record is not None:
+            self._mita_adopt_record(self._mita_pending_record)
         self.query_one("#prompt", Input).focus()
+
+    def _mita_adopt_record(self, record: SessionRecord) -> None:
+        """Restore a saved session as the live conversation and session identity."""
+        if warning := self._mita_tracker.cwd_warning(record):
+            self.notice(warning)
+        self._mita_conversation, banner = self._mita_tracker.adopt(record, self._mita_registry)
+        self._out.write(Text(banner, "green"))
 
     @property
     def _out(self) -> RichLog:
@@ -147,18 +191,47 @@ class MitaTUI(App[None]):
         event.input.value = ""
         if not text:
             return
-        if text.lower() in ("/quit", "/exit", "/q"):
+        cmd, _, arg = text.partition(" ")
+        cmd = cmd.lower()
+        if cmd in ("/quit", "/exit", "/q"):
             self.exit()
             return
-        if text.lower() == "/clear":
+        if cmd == "/clear":
             if self._mita_conversation is not None:
                 self._mita_conversation.clear_non_system()
+            # Start a new session file so the cleared history does not overwrite
+            # the session that was just resumed.
+            self._mita_tracker.reset()
             self._out.clear()
+            return
+        if cmd == "/resume":
+            # Must run in a worker: the picker uses push_screen_wait, which raises
+            # NoActiveWorker when awaited directly from a message handler.
+            self.run_worker(self._mita_resume(arg.strip()), exclusive=True)
             return
 
         self._out.write(Text(f"❯ {escape(text)}", "bold"))
         event.input.disabled = True
         self.run_worker(self._run_turn(text), exclusive=True)
+
+    async def _mita_resume(self, session_id: str) -> None:
+        """Handle /resume [id]: load directly or open the session picker."""
+        store = self._mita_tracker.store
+        if not session_id:
+            metas = store.list_metas()[:10]
+            if not metas:
+                self.notice("No saved sessions.")
+                return
+            picked = await self.push_screen_wait(SessionPickerScreen(metas))
+            if picked is None:
+                return
+            session_id = picked
+        try:
+            record = store.load(store.resolve(session_id))
+        except SessionStoreError as e:
+            self.error(str(e))
+            return
+        self._mita_adopt_record(record)
 
     async def _run_turn(self, text: str) -> None:
         from mita.agent.loop import run_agent
@@ -173,6 +246,9 @@ class MitaTUI(App[None]):
                 session_approved=self._mita_session_approved,
                 sink=self,
             )
+            if self._mita_config.sessions.autosave and self._mita_conversation is not None:
+                if error := self._mita_tracker.save(self._mita_conversation, text):
+                    self.notice(error)
         finally:
             prompt = self.query_one("#prompt", Input)
             prompt.disabled = False
@@ -183,6 +259,9 @@ def run_tui(
     config: MitaConfig,
     registry: ToolRegistry,
     session_approved: set[str] | None = None,
+    *,
+    tracker: SessionTracker,
+    resume_record: SessionRecord | None = None,
 ) -> None:
     """Launch the Textual TUI (blocking)."""
-    MitaTUI(config, registry, session_approved).run()
+    MitaTUI(config, registry, session_approved, tracker=tracker, resume_record=resume_record).run()

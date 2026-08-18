@@ -29,6 +29,11 @@ def get_project_config_path(project_root: Path | None = None) -> Path | None:
     return path if path.is_file() else None
 
 
+def get_project_root(start: Path | None = None) -> Path | None:
+    """Return the project root (nearest ancestor with .git or .mita), or None."""
+    return _find_project_root(start or Path.cwd())
+
+
 def _find_project_root(start: Path) -> Path | None:
     """Walk up from start to find a project root (contains .git or .mita)."""
     current = start.resolve()

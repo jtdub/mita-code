@@ -11,6 +11,7 @@ from mita.config.schema import (
     OllamaSettings,
     PermissionMode,
     PluginDefinition,
+    SessionSettings,
     ToolSettings,
 )
 
@@ -150,3 +151,17 @@ class TestPermissionMode:
         trust = set(PERMISSION_MODE_TOOLS[PermissionMode.TRUST])
         assert ask.issubset(auto_edit)
         assert auto_edit.issubset(trust)
+
+
+class TestSessionSettings:
+    def test_defaults(self) -> None:
+        cfg = MitaConfig()
+        assert cfg.sessions.autosave is True
+        assert cfg.sessions.max_age_days == 7
+
+    def test_negative_max_age_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SessionSettings(max_age_days=-1)
+
+    def test_zero_max_age_allowed(self) -> None:
+        assert SessionSettings(max_age_days=0).max_age_days == 0
