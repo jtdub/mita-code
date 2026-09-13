@@ -1,15 +1,15 @@
-"""Embedding generation for code chunks, routed to the configured backend (finding C5)."""
+"""Embedding generation for code chunks, routed to the configured backend."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
 
-import litellm
 import ollama
+from langchain_core.embeddings import Embeddings
 
 from mita.config.schema import MitaConfig
+from mita.llm.factory import build_embedding_model
 from mita.llm.providers import resolve_backend
 
 BATCH_SIZE = 32
@@ -23,9 +23,10 @@ class EmbeddingClient:
     def __init__(self, config: MitaConfig) -> None:
         self._model = config.model.embedding
         self._backend = resolve_backend(config)
+        self._embeddings: Embeddings = build_embedding_model(config)
         self._timeout = config.ollama.timeout
-        # Ollama uses its native client; every other backend serves /v1/embeddings, for
-        # which the universal LiteLLM route is `openai/<model>` + api_base.
+        # Only Ollama exposes a model registry; the client is used for the
+        # availability check, not for embedding.
         self._ollama = ollama.AsyncClient(host=config.ollama.host) if self.is_ollama else None
 
     @property
@@ -50,25 +51,11 @@ class EmbeddingClient:
         return result[0]
 
     async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
-        if self._ollama is not None:
-            ollama_resp = await asyncio.wait_for(
-                self._ollama.embed(model=self._model, input=batch),
-                timeout=self._timeout,
-            )
-            return [list(e) for e in ollama_resp.embeddings]
-
-        # OpenAI-compatible path. LiteLLM returns the OpenAI shape
-        # (response.data[i]["embedding"]), which differs from Ollama's .embeddings.
-        litellm_resp: Any = await asyncio.wait_for(
-            litellm.aembedding(
-                model=f"openai/{self._model}",
-                input=batch,
-                api_base=self._backend.api_base,
-                api_key=self._backend.api_key,
-            ),
+        embeddings = await asyncio.wait_for(
+            self._embeddings.aembed_documents(batch),
             timeout=self._timeout,
         )
-        return [_extract_embedding(item) for item in litellm_resp.data]
+        return [list(e) for e in embeddings]
 
     async def is_model_available(self) -> bool:
         """Check the embedding model is available.
@@ -89,9 +76,3 @@ class EmbeddingClient:
         except (ollama.ResponseError, ConnectionError, OSError) as e:
             _logger.warning("Embedding model check failed: %s", e)
             return False
-
-
-def _extract_embedding(item: Any) -> list[float]:
-    """Read the vector from a LiteLLM/OpenAI embedding item (dict or object)."""
-    vec = item["embedding"] if isinstance(item, dict) else item.embedding
-    return [float(x) for x in vec]

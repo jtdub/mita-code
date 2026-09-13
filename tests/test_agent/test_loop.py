@@ -1,178 +1,312 @@
-"""Tests for the core agent loop."""
+"""Tests for the core agent loop (LangGraph)."""
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from mita.agent.conversation import Conversation, Message, Role
-from mita.agent.loop import (
-    _accumulate_tool_call_deltas,
-    _extract_tool_calls_from_text,
-    _parse_response,
-    run_agent,
-)
+from mita.agent.loop import _extract_tool_calls_from_text, run_agent
 from mita.config.schema import MitaConfig
-from mita.tools.registry import ToolRegistry, create_default_registry
+from mita.tools.registry import ToolRegistry
 from mita.tools.schema import ToolDefinition, ToolParameter, ToolResult
 
 
-class TestParseResponse:
-    def test_text_response(self) -> None:
-        class Msg:
-            content = "Hello!"
-            tool_calls = None
-
-        class Choice:
-            message = Msg()
-
-        class Response:
-            choices = [Choice()]
-
-        text, calls = _parse_response(Response())
-        assert text == "Hello!"
-        assert calls == []
-
-    def test_empty_response(self) -> None:
-        text, calls = _parse_response({})
-        assert text == ""
-        assert calls == []
+def _config() -> MitaConfig:
+    config = MitaConfig()
+    config.ui.stream = False
+    config.llm.context_probe = "off"
+    config.index.enabled = False
+    return config
 
 
-class TestAccumulateToolCallDeltas:
-    def test_accumulate_object_style(self) -> None:
-        """Accumulate tool call deltas from object-style streaming chunks."""
+def _fake_model(
+    ainvoke_side_effect: list[Any] | None = None, stream_chunks: list[Any] | None = None
+) -> MagicMock:
+    """Return a mock LangChain model with the loop's expected surface."""
+    model = MagicMock()
+    model.bind_tools = MagicMock(side_effect=lambda tools: model)
+    if stream_chunks is not None:
 
-        class Func:
-            name = "file_read"
-            arguments = '{"path":'
+        async def _astream(_messages: object) -> Any:
+            for chunk in stream_chunks:
+                yield chunk
 
-        class ToolCallDelta:
-            index = 0
-            id = "tc_1"
-            function = Func()
-
-        class Delta:
-            content = None
-            tool_calls = [ToolCallDelta()]
-
-        class Choice:
-            delta = Delta()
-
-        class Chunk:
-            choices = [Choice()]
-
-        acc: dict[int, dict[str, Any]] = {}
-        _accumulate_tool_call_deltas(Chunk(), acc)
-
-        assert 0 in acc
-        assert acc[0]["id"] == "tc_1"
-        assert acc[0]["function"]["name"] == "file_read"
-        assert acc[0]["function"]["arguments"] == '{"path":'
-
-        # Second chunk appends arguments
-        class Func2:
-            name = None
-            arguments = '"/tmp"}'
-
-        class ToolCallDelta2:
-            index = 0
-            id = None
-            function = Func2()
-
-        class Delta2:
-            content = None
-            tool_calls = [ToolCallDelta2()]
-
-        class Choice2:
-            delta = Delta2()
-
-        class Chunk2:
-            choices = [Choice2()]
-
-        _accumulate_tool_call_deltas(Chunk2(), acc)
-        assert acc[0]["function"]["arguments"] == '{"path":"/tmp"}'
-
-    def test_accumulate_dict_style(self) -> None:
-        """Accumulate tool call deltas from dict-style streaming chunks."""
-        acc: dict[int, dict[str, Any]] = {}
-        chunk = {
-            "choices": [
-                {
-                    "delta": {
-                        "tool_calls": [
-                            {
-                                "index": 0,
-                                "id": "tc_2",
-                                "function": {"name": "shell", "arguments": '{"cmd":'},
-                            }
-                        ]
-                    }
-                }
-            ]
-        }
-        _accumulate_tool_call_deltas(chunk, acc)
-        assert acc[0]["function"]["name"] == "shell"
-
-    def test_empty_chunk_no_error(self) -> None:
-        """Empty chunks should be silently ignored."""
-        acc: dict[int, dict[str, Any]] = {}
-        _accumulate_tool_call_deltas({}, acc)
-        assert acc == {}
-        _accumulate_tool_call_deltas({"choices": []}, acc)
-        assert acc == {}
+        model.astream = _astream
+    else:
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="Here is the answer."))
+        if ainvoke_side_effect is not None:
+            model.ainvoke = AsyncMock(side_effect=ainvoke_side_effect)
+    return model
 
 
 class TestRunAgent:
     @pytest.mark.asyncio()
     async def test_basic_text_response(self) -> None:
-        """Agent returns text with no tool calls."""
-        config = MitaConfig()
-        config.ui.stream = False
+        config = _config()
         console = MagicMock()
-        console.print = MagicMock()
 
-        # Mock LLM client
-        mock_client = AsyncMock()
-
-        class Msg:
-            content = "Here is the answer."
-            tool_calls = None
-
-        class Choice:
-            message = Msg()
-
-        class Response:
-            choices = [Choice()]
-
-        mock_client.chat = AsyncMock(return_value=Response())
-
-        registry = create_default_registry()
-
-        with patch("mita.agent.loop.assemble_context"):
+        with patch("mita.agent.loop.build_chat_model", return_value=_fake_model()):
             conv = Conversation()
             conv.add(Message(role=Role.SYSTEM, content="system"))
-            result = await run_agent(
-                "test prompt",
-                config,
-                console,
-                conversation=conv,
-                registry=registry,
-                llm_client=mock_client,
-            )
+            result = await run_agent("test prompt", config, console, conversation=conv)
 
-        assert len(result.messages) >= 3  # system + user + assistant
-        # User message was added
         user_msgs = [m for m in result.messages if m.role == Role.USER]
         assert len(user_msgs) == 1
         assert user_msgs[0].content == "test prompt"
+        assistant_msgs = [m for m in result.messages if m.role == Role.ASSISTANT]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0].content == "Here is the answer."
 
     @pytest.mark.asyncio()
-    async def test_max_iterations_default(self) -> None:
-        cfg = MitaConfig()
-        assert cfg.max_iterations == 25
+    async def test_tool_call_flow(self) -> None:
+        config = _config()
+        console = MagicMock()
+
+        tool_response = AIMessage(
+            content="",
+            tool_calls=[{"name": "file_read", "args": {"path": "/tmp/none"}, "id": "call-1"}],
+        )
+        model = _fake_model(ainvoke_side_effect=[tool_response, AIMessage(content="done")])
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("read a file", config, console, conversation=conv)
+
+        tool_msgs = [m for m in result.messages if m.role == Role.TOOL]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_call_id == "call-1"
+        assistant_msgs = [m for m in result.messages if m.role == Role.ASSISTANT]
+        assert assistant_msgs[-1].content == "done"
+
+    @pytest.mark.asyncio()
+    async def test_streaming_mode(self) -> None:
+        config = _config()
+        config.ui.stream = True
+        console = MagicMock()
+
+        model = _fake_model(
+            stream_chunks=[AIMessageChunk(content="streamed "), AIMessageChunk(content="answer")]
+        )
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("test", config, console, conversation=conv)
+
+        assistant_msgs = [m for m in result.messages if m.role == Role.ASSISTANT]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0].content == "streamed answer"
+
+    @pytest.mark.asyncio()
+    async def test_streaming_tool_call_deltas(self) -> None:
+        config = _config()
+        config.ui.stream = True
+        console = MagicMock()
+
+        model = _fake_model(
+            stream_chunks=[
+                AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": "file_",
+                            "args": '{"path"',
+                            "id": "call-1",
+                            "index": 0,
+                            "type": "function",
+                        }
+                    ],
+                ),
+                AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {"name": "read", "args": ': "/tmp/none"}', "index": 0, "type": "function"}
+                    ],
+                ),
+            ]
+        )
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("read", config, console, conversation=conv)
+
+        tool_msgs = [m for m in result.messages if m.role == Role.TOOL]
+        assert len(tool_msgs) == 1
+
+    @pytest.mark.asyncio()
+    async def test_text_json_fallback(self) -> None:
+        config = _config()
+        console = MagicMock()
+
+        model = _fake_model(
+            ainvoke_side_effect=[
+                AIMessage(content='{"name": "file_read", "arguments": {"path": "/tmp/none"}}'),
+                AIMessage(content="done"),
+            ]
+        )
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("read", config, console, conversation=conv)
+
+        tool_msgs = [m for m in result.messages if m.role == Role.TOOL]
+        assert len(tool_msgs) == 1
+
+    @pytest.mark.asyncio()
+    async def test_max_iterations_reached(self) -> None:
+        config = _config()
+        config.max_iterations = 1
+        console = MagicMock()
+
+        model = _fake_model(
+            ainvoke_side_effect=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "file_read", "args": {"path": "/tmp/none"}, "id": "call-1"}
+                    ],
+                )
+            ]
+        )
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("test", config, console, conversation=conv)
+
+        assert isinstance(result, Conversation)
+        tool_msgs = [m for m in result.messages if m.role == Role.TOOL]
+        assert len(tool_msgs) == 1
+
+    @pytest.mark.asyncio()
+    async def test_repeated_tool_calls_detected(self) -> None:
+        config = _config()
+        config.max_iterations = 5
+        console = MagicMock()
+
+        tool_response = AIMessage(
+            content="",
+            tool_calls=[{"name": "file_read", "args": {"path": "/tmp/none"}, "id": "call-1"}],
+        )
+        model = _fake_model(
+            ainvoke_side_effect=[
+                tool_response,
+                tool_response,
+                AIMessage(content="done"),
+            ]
+        )
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("test", config, console, conversation=conv)
+
+        # The repeated batch must not run a second time (only one tool result).
+        tool_msgs = [m for m in result.messages if m.role == Role.TOOL]
+        assert len(tool_msgs) == 1
+
+    @pytest.mark.asyncio()
+    async def test_connection_error_handling(self) -> None:
+        config = _config()
+        console = MagicMock()
+
+        model = _fake_model()
+        model.ainvoke = AsyncMock(side_effect=ConnectionError("offline"))
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("test", config, console, conversation=conv)
+
+        assert isinstance(result, Conversation)
+
+    @pytest.mark.asyncio()
+    async def test_json_decode_error(self) -> None:
+        config = _config()
+        console = MagicMock()
+
+        model = _fake_model()
+        model.ainvoke = AsyncMock(side_effect=json.JSONDecodeError("err", "", 0))
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("test", config, console, conversation=conv)
+
+        assert isinstance(result, Conversation)
+
+    @pytest.mark.asyncio()
+    async def test_rag_context_injection(self) -> None:
+        config = _config()
+        config.index.enabled = True
+        console = MagicMock()
+
+        mock_retriever = MagicMock()
+        mock_retriever.is_available.return_value = True
+        mock_retriever.retrieve_formatted = AsyncMock(return_value="relevant code")
+
+        with (
+            patch("mita.agent.loop.build_chat_model", return_value=_fake_model()),
+            patch("mita.index.retriever.Retriever", return_value=mock_retriever),
+        ):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("test", config, console, conversation=conv)
+
+        rag_msgs = [
+            m for m in result.messages if m.role == Role.SYSTEM and "Relevant code" in m.content
+        ]
+        assert len(rag_msgs) == 1
+
+    @pytest.mark.asyncio()
+    async def test_hooks_called(self) -> None:
+        from mita.config.schema import HookDefinition
+
+        config = _config()
+        config.hooks = [HookDefinition(event="session_start", command="echo start")]
+        console = MagicMock()
+
+        with (
+            patch("mita.agent.loop.build_chat_model", return_value=_fake_model()),
+            patch("mita.hooks.runner.run_hooks", new_callable=AsyncMock) as mock_hooks,
+        ):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            await run_agent("test", config, console, conversation=conv)
+
+        assert mock_hooks.call_count >= 2
+
+
+class TestKeyboardInterrupt:
+    @pytest.mark.asyncio()
+    async def test_interrupt_during_llm_call(self) -> None:
+        config = _config()
+        console = MagicMock()
+
+        model = _fake_model()
+        model.ainvoke = AsyncMock(side_effect=KeyboardInterrupt)
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("test", config, console, conversation=conv)
+
+        user_msgs = [m for m in result.messages if m.role == Role.USER]
+        assert len(user_msgs) == 1
+
+    @pytest.mark.asyncio()
+    async def test_interrupt_preserves_conversation(self) -> None:
+        config = _config()
+        console = MagicMock()
+
+        model = _fake_model()
+        model.ainvoke = AsyncMock(side_effect=KeyboardInterrupt)
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("test prompt", config, console, conversation=conv)
+
+        assert isinstance(result, Conversation)
+        assert len(result.messages) >= 2
 
 
 def _make_registry_with_tool(name: str) -> ToolRegistry:
@@ -246,62 +380,3 @@ class TestExtractToolCallsFromText:
         calls, remaining = _extract_tool_calls_from_text("", registry)
         assert len(calls) == 0
         assert remaining == ""
-
-
-class TestKeyboardInterrupt:
-    @pytest.mark.asyncio()
-    async def test_interrupt_during_llm_call(self) -> None:
-        """KeyboardInterrupt during LLM call is caught and loop exits."""
-        config = MitaConfig()
-        config.ui.stream = False
-        mock_console = MagicMock()
-        mock_console.print = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.chat = AsyncMock(side_effect=KeyboardInterrupt)
-
-        registry = create_default_registry()
-
-        with patch("mita.agent.loop.assemble_context"):
-            conv = Conversation()
-            conv.add(Message(role=Role.SYSTEM, content="system"))
-            result = await run_agent(
-                "test",
-                config,
-                mock_console,
-                conversation=conv,
-                registry=registry,
-                llm_client=mock_client,
-            )
-
-        # Should have user message but loop should have exited gracefully
-        user_msgs = [m for m in result.messages if m.role == Role.USER]
-        assert len(user_msgs) == 1
-
-    @pytest.mark.asyncio()
-    async def test_interrupt_preserves_conversation(self) -> None:
-        """After KeyboardInterrupt, the conversation is returned."""
-        config = MitaConfig()
-        config.ui.stream = False
-        mock_console = MagicMock()
-        mock_console.print = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.chat = AsyncMock(side_effect=KeyboardInterrupt)
-
-        registry = create_default_registry()
-
-        with patch("mita.agent.loop.assemble_context"):
-            conv = Conversation()
-            conv.add(Message(role=Role.SYSTEM, content="system"))
-            result = await run_agent(
-                "test prompt",
-                config,
-                mock_console,
-                conversation=conv,
-                registry=registry,
-                llm_client=mock_client,
-            )
-
-        assert isinstance(result, Conversation)
-        assert len(result.messages) >= 2  # system + user at minimum

@@ -1,4 +1,4 @@
-"""Core async agent loop: prompt → LLM → parse tool calls → execute → loop."""
+"""Core async agent loop: a LangGraph state graph over prompt → model → tools."""
 
 from __future__ import annotations
 
@@ -9,16 +9,18 @@ import logging
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, TypedDict, cast
 
+from langchain_core.messages import AIMessage
+from langgraph.graph import END, START, StateGraph
 from rich.console import Console
 
 from mita.agent.context import assemble_context
 from mita.agent.conversation import Conversation, Message, Role
 from mita.config.schema import MitaConfig
-from mita.llm.client import LLMClient
-from mita.llm.streaming import extract_delta_content
+from mita.llm.context import resolve_context_window
+from mita.llm.factory import build_chat_model
 from mita.tools.executor import execute_tool
 from mita.tools.registry import ToolRegistry, create_default_registry
 from mita.tools.schema import ToolCall
@@ -29,13 +31,29 @@ _logger = logging.getLogger(__name__)
 _RAG_CONTEXT_PREFIX = "Relevant code from the project index:"
 
 
+class _AgentState(TypedDict):
+    """State shared by the graph nodes. The conversation is mutated in place."""
+
+    conversation: Conversation
+    config: MitaConfig
+    registry: ToolRegistry
+    sink: UISink
+    session_approved: set[str]
+    auto_confirm: bool
+    console: Console | None
+    context_window: int
+    last_tool_sig: str | None
+    iteration: int
+    stop: bool
+    stop_reason: str | None
+
+
 async def run_agent(
     user_prompt: str,
     config: MitaConfig,
     console: Console,
     conversation: Conversation | None = None,
     registry: ToolRegistry | None = None,
-    llm_client: LLMClient | None = None,
     session_approved: set[str] | None = None,
     auto_confirm: bool = False,
     sink: UISink | None = None,
@@ -48,58 +66,22 @@ async def run_agent(
         console: Rich console for output (used to build the default sink).
         conversation: Existing conversation to continue, or None to start fresh.
         registry: Tool registry, or None to create default.
-        llm_client: LLM client, or None to create from config.
         session_approved: Tool names approved for the session (skip confirmation).
-            The loop adds a tool name here when the user answers "always".
-        auto_confirm: When True, approve destructive actions without prompting
-            (used by non-interactive `mita ask --yes`).
-        sink: UI event sink; defaults to a RichConsoleSink over ``console``. A Textual
-            TUI passes its own sink so the loop needs no changes.
+        auto_confirm: When True, approve destructive actions without prompting.
+        sink: UI event sink; defaults to a RichConsoleSink over ``console``.
 
     Returns:
         The updated conversation.
     """
-    # Initialize
     if sink is None:
         sink = RichConsoleSink(console)
     if registry is None:
         registry = create_default_registry()
-
-    if llm_client is None:
-        llm_client = LLMClient(config)
     if conversation is None:
         conversation = Conversation()
         assemble_context(conversation, config, registry)
 
-    # Add user message
     conversation.add(Message(role=Role.USER, content=user_prompt))
-
-    # Inject RAG context if index is available (replace previous RAG message)
-    retriever = None
-    if config.index.enabled:
-        try:
-            from mita.index.retriever import Retriever
-
-            retriever = Retriever(config)
-            if retriever.is_available():
-                rag_context = await retriever.retrieve_formatted(user_prompt)
-                if rag_context:
-                    # Remove any previous RAG context message
-                    conversation.messages = [
-                        m
-                        for m in conversation.messages
-                        if not (m.role == Role.SYSTEM and m.content.startswith(_RAG_CONTEXT_PREFIX))
-                    ]
-                    conversation.add(
-                        Message(
-                            role=Role.SYSTEM,
-                            content=f"{_RAG_CONTEXT_PREFIX}\n{rag_context}",
-                        )
-                    )
-        except Exception:  # noqa: BLE001 - RAG is optional; never let it abort the turn
-            # Broad by design: embedding backends raise provider-specific errors
-            # (ollama.ResponseError, httpx.HTTPError, ...) that must degrade, not crash.
-            _logger.warning("RAG index unavailable, proceeding without it", exc_info=True)
 
     # Fire session_start hooks
     if config.hooks:
@@ -112,132 +94,34 @@ async def run_agent(
             timeout=config.hook_settings.timeout,
         )
 
-    # Resolve the effective context window (probe the backend, else the config value).
-    from mita.llm.context import resolve_context_window
-
     context_window = await resolve_context_window(config)
 
-    # Agent loop
-    last_tool_signature: str | None = None
-    repeat_count = 0
-    max_iterations = config.max_iterations
-    assistant_text = ""
-    tool_schemas = registry.get_openai_schemas()
-    for _iteration in range(max_iterations):
-        try:
-            # Truncate to fit context window
-            conversation.truncate_to_fit(context_window)
+    state: _AgentState = {
+        "conversation": conversation,
+        "config": config,
+        "registry": registry,
+        "sink": sink,
+        "session_approved": session_approved if session_approved is not None else set(),
+        "auto_confirm": auto_confirm,
+        "console": console,
+        "context_window": context_window,
+        "last_tool_sig": None,
+        "iteration": 0,
+        "stop": False,
+        "stop_reason": None,
+    }
 
-            # Call LLM with tool schemas so the model can produce structured tool calls
-            messages = conversation.get_messages_for_api()
+    try:
+        compiled = _build_graph().compile()
+        await cast(Any, compiled).ainvoke(state)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        sink.error("[Interrupted]")
+    except Exception as e:  # noqa: BLE001 - a failing tool must not kill the turn
+        _logger.error("Unexpected error in agent loop: %s", e, exc_info=True)
+        sink.error(f"Unexpected error: {e}")
 
-            if config.ui.stream:
-                assistant_text, tool_calls_raw, stats = await _stream_response(
-                    llm_client, messages, tool_schemas, sink
-                )
-                if config.ui.show_token_count:
-                    sink.response_stats(
-                        stats.prompt_tokens,
-                        stats.completion_tokens,
-                        stats.total_time,
-                        stats.ttft,
-                    )
-            else:
-                t0 = time.monotonic()
-                with sink.busy("Thinking..."):
-                    response = await llm_client.chat(messages, tools=tool_schemas)
-                elapsed = time.monotonic() - t0
-                assistant_text, tool_calls_raw = _parse_response(response)
-                if assistant_text:
-                    sink.assistant_message(assistant_text)
-                if config.ui.show_token_count:
-                    usage = _extract_usage(response) or {}
-                    sink.response_stats(
-                        usage.get("prompt_tokens", 0),
-                        usage.get("completion_tokens", 0),
-                        elapsed,
-                        None,
-                    )
-
-            # Fallback: parse tool calls from text if model didn't use native calling
-            if not tool_calls_raw and assistant_text:
-                parsed, remaining_text = _extract_tool_calls_from_text(assistant_text, registry)
-                if parsed:
-                    tool_calls_raw = parsed
-                    assistant_text = remaining_text
-
-            # Handle tool calls
-            if tool_calls_raw:
-                # Detect repeated identical tool calls (model stuck in a loop)
-                sig = json.dumps(
-                    [
-                        (
-                            tc.get("function", {}).get("name"),
-                            tc.get("function", {}).get("arguments"),
-                        )
-                        for tc in tool_calls_raw
-                    ],
-                    sort_keys=True,
-                )
-                if sig == last_tool_signature:
-                    repeat_count += 1
-                    if repeat_count >= 1:
-                        sink.error("Detected repeated tool call — stopping to avoid infinite loop.")
-                        conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-                        break
-                else:
-                    repeat_count = 0
-                last_tool_signature = sig
-
-                conversation.add(
-                    Message(
-                        role=Role.ASSISTANT,
-                        content=assistant_text,
-                        tool_calls=tool_calls_raw,
-                    )
-                )
-                await _process_tool_calls(
-                    tool_calls_raw,
-                    conversation,
-                    registry,
-                    config,
-                    sink,
-                    session_approved,
-                    auto_confirm=auto_confirm,
-                    console=console,
-                )
-                continue
-
-            # No tool calls — add assistant message and stop
-            conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-            break
-
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            # Ctrl-C surfaces as KeyboardInterrupt under asyncio.run, and as
-            # CancelledError when a turn task is cancelled. Handle both so the
-            # conversation stays valid and session_end hooks still run.
-            sink.error("[Interrupted]")
-            if assistant_text:
-                conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-            break
-        except (ConnectionError, TimeoutError, OSError) as e:
-            _logger.warning("LLM call failed: %s", e, exc_info=True)
-            sink.error(f"LLM error: {e}")
-            if assistant_text:
-                conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-            break
-        except json.JSONDecodeError as e:
-            _logger.warning("Failed to parse LLM response: %s", e, exc_info=True)
-            sink.error(f"Response parse error: {e}")
-            break
-        except Exception as e:  # noqa: BLE001
-            _logger.error("Unexpected error in agent loop: %s", e, exc_info=True)
-            sink.error(f"Unexpected error: {e}")
-            if assistant_text:
-                conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-            break
-    else:
-        sink.error(f"Reached maximum iterations ({max_iterations}). Stopping.")
+    if state["stop_reason"] == "max_iterations":
+        sink.error(f"Reached maximum iterations ({config.max_iterations}). Stopping.")
 
     # Fire session_end hooks
     if config.hooks:
@@ -253,189 +137,304 @@ async def run_agent(
     return conversation
 
 
-@dataclass
-class _ResponseStats:
-    """Token usage and timing stats from an LLM response."""
+def _build_graph() -> StateGraph[_AgentState]:
+    """Build the agent graph: retrieve → model → (tools → model)* → end."""
+    graph = StateGraph(_AgentState)
+    graph.add_node("retrieve", _retrieve_node)
+    graph.add_node("model", _model_node)
+    graph.add_node("tools", _tools_node)
+    graph.add_edge(START, "retrieve")
+    graph.add_edge("retrieve", "model")
+    graph.add_conditional_edges("model", _route_after_model, {"tools": "tools", "end": END})
+    graph.add_conditional_edges("tools", _route_after_tools, {"model": "model", "end": END})
+    return graph
 
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_time: float = 0.0
-    ttft: float | None = field(default=None)
+
+async def _retrieve_node(state: _AgentState) -> dict[str, Any]:
+    """Inject RAG context for the latest user message, replacing the previous one."""
+    config = state["config"]
+    conversation = state["conversation"]
+    if not config.index.enabled:
+        return {}
+
+    try:
+        from mita.index.retriever import Retriever
+
+        retriever = Retriever(config)
+        if retriever.is_available():
+            user_texts = [m.content for m in conversation.messages if m.role == Role.USER]
+            if user_texts:
+                rag_context = await retriever.retrieve_formatted(user_texts[-1])
+                if rag_context:
+                    conversation.messages = [
+                        m
+                        for m in conversation.messages
+                        if not (m.role == Role.SYSTEM and m.content.startswith(_RAG_CONTEXT_PREFIX))
+                    ]
+                    conversation.add(
+                        Message(
+                            role=Role.SYSTEM,
+                            content=f"{_RAG_CONTEXT_PREFIX}\n{rag_context}",
+                        )
+                    )
+    except Exception:  # noqa: BLE001 - RAG is optional; never let it abort the turn
+        # Broad by design: embedding backends raise provider-specific errors
+        # (ollama.ResponseError, httpx.HTTPError, ...) that must degrade, not crash.
+        _logger.warning("RAG index unavailable, proceeding without it", exc_info=True)
+
+    return {}
 
 
-async def _stream_response(
-    client: LLMClient,
+async def _model_node(state: _AgentState) -> dict[str, Any]:
+    """Call the model, stream output, parse tool calls, and record the assistant turn."""
+    config = state["config"]
+    conversation = state["conversation"]
+    registry = state["registry"]
+    sink = state["sink"]
+    iteration = state["iteration"] + 1
+
+    conversation.truncate_to_fit(state["context_window"])
+    messages = conversation.get_messages_for_api()
+
+    model = build_chat_model(config)
+    tool_schemas = registry.get_openai_schemas()
+    bound_model: Any = model.bind_tools(tool_schemas) if tool_schemas else model
+
+    assistant_text = ""
+    tool_calls_raw: list[dict[str, Any]] = []
+    usage: dict[str, int] | None = None
+    elapsed = 0.0
+    ttft: float | None = None
+
+    try:
+        if config.ui.stream:
+            assistant_text, tool_calls_raw, usage, elapsed, ttft = await _stream_model(
+                bound_model, messages, sink
+            )
+        else:
+            t0 = time.monotonic()
+            with sink.busy("Thinking..."):
+                response = await bound_model.ainvoke(messages)
+            elapsed = time.monotonic() - t0
+            if isinstance(response, AIMessage):
+                assistant_text = _content_text(response.content)
+                tool_calls_raw = _tool_calls_to_openai(response.tool_calls)
+                usage = _usage_metadata(response)
+            if assistant_text:
+                sink.assistant_message(assistant_text)
+
+        if config.ui.show_token_count and usage:
+            sink.response_stats(
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+                elapsed,
+                ttft,
+            )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        sink.error("[Interrupted]")
+        if assistant_text:
+            conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+        return _stop(state, conversation, iteration, "interrupted")
+    except (ConnectionError, TimeoutError, OSError) as e:
+        _logger.warning("LLM call failed: %s", e, exc_info=True)
+        sink.error(f"LLM error: {e}")
+        if assistant_text:
+            conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+        return _stop(state, conversation, iteration, "error")
+    except Exception as e:  # noqa: BLE001
+        _logger.error("Unexpected error in agent loop: %s", e, exc_info=True)
+        sink.error(f"Unexpected error: {e}")
+        if assistant_text:
+            conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+        return _stop(state, conversation, iteration, "error")
+
+    # Fallback: parse tool calls from text if the model didn't use native calling.
+    if not tool_calls_raw and assistant_text:
+        parsed, remaining = _extract_tool_calls_from_text(assistant_text, registry)
+        if parsed:
+            tool_calls_raw = parsed
+            assistant_text = remaining
+
+    # Detect a repeated identical tool-call batch and stop before it runs again.
+    last_sig = state["last_tool_sig"]
+    if tool_calls_raw:
+        sig = json.dumps(
+            [
+                (tc.get("function", {}).get("name"), tc.get("function", {}).get("arguments"))
+                for tc in tool_calls_raw
+            ],
+            sort_keys=True,
+        )
+        if sig == state["last_tool_sig"]:
+            sink.error("Detected repeated tool call — stopping to avoid infinite loop.")
+            conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+            return _stop(state, conversation, iteration, "repeat")
+        last_sig = sig
+
+    conversation.add(
+        Message(
+            role=Role.ASSISTANT,
+            content=assistant_text,
+            tool_calls=tool_calls_raw,
+        )
+    )
+
+    stop = iteration >= config.max_iterations
+    return {
+        "conversation": conversation,
+        "last_tool_sig": last_sig,
+        "iteration": iteration,
+        "stop": stop,
+        "stop_reason": "max_iterations" if stop else None,
+    }
+
+
+def _stop(
+    state: _AgentState, conversation: Conversation, iteration: int, reason: str
+) -> dict[str, Any]:
+    """Build a state update that halts the graph."""
+    return {
+        "conversation": conversation,
+        "iteration": iteration,
+        "stop": True,
+        "stop_reason": reason,
+    }
+
+
+async def _tools_node(state: _AgentState) -> dict[str, Any]:
+    """Execute the tool calls on the latest assistant message."""
+    conversation = state["conversation"]
+    last_message = conversation.messages[-1]
+    await _process_tool_calls(
+        last_message.tool_calls,
+        conversation,
+        state["registry"],
+        state["config"],
+        state["sink"],
+        session_approved=state["session_approved"],
+        auto_confirm=state["auto_confirm"],
+        console=state["console"],
+    )
+    return {"conversation": conversation}
+
+
+def _route_after_model(state: _AgentState) -> str:
+    """Run the tools node when the assistant requested tools, else end."""
+    last = state["conversation"].messages[-1]
+    if last.role == Role.ASSISTANT and last.tool_calls:
+        return "tools"
+    return "end"
+
+
+def _route_after_tools(state: _AgentState) -> str:
+    """Return to the model unless a stop condition was set."""
+    return "end" if state["stop"] else "model"
+
+
+async def _stream_model(
+    model: Any,
     messages: list[dict[str, Any]],
-    tool_schemas: list[dict[str, Any]],
     sink: UISink,
-) -> tuple[str, list[dict[str, Any]], _ResponseStats]:
-    """Stream the LLM response, displaying tokens as they arrive.
+) -> tuple[str, list[dict[str, Any]], dict[str, int] | None, float, float | None]:
+    """Stream the model response, displaying tokens as they arrive.
 
     Returns:
-        Tuple of (text_content, tool_calls_raw, stats).
+        Tuple of (text_content, tool_calls_raw, usage, elapsed, ttft).
     """
     text_parts: list[str] = []
-    tool_calls_by_index: dict[int, dict[str, Any]] = {}
+    tool_calls_by_index: dict[int, dict[str, str]] = {}
+    usage: dict[str, int] | None = None
     first_token = True
-    stats = _ResponseStats()
     start_time = time.monotonic()
+    ttft: float | None = None
 
     spinner_stack = contextlib.ExitStack()
     spinner_stack.enter_context(sink.busy("Thinking..."))
 
     try:
-        async for chunk in client.stream_chat(messages, tools=tool_schemas):
+        async for chunk in model.astream(messages):
             if first_token:
                 spinner_stack.close()
-                stats.ttft = time.monotonic() - start_time
+                ttft = time.monotonic() - start_time
                 first_token = False
 
-            delta = extract_delta_content(chunk)
-            if delta:
-                text_parts.append(delta)
-                sink.stream_token(delta)
+            text = _content_text(chunk.content)
+            if text:
+                text_parts.append(text)
+                sink.stream_token(text)
 
-            _accumulate_tool_call_deltas(chunk, tool_calls_by_index)
+            for tc in getattr(chunk, "tool_call_chunks", []) or []:
+                idx = tc.get("index", 0)
+                entry = tool_calls_by_index.setdefault(idx, {"id": "", "name": "", "args": ""})
+                if tc.get("id"):
+                    entry["id"] = tc["id"]
+                if tc.get("name"):
+                    entry["name"] += tc["name"]
+                if tc.get("args"):
+                    entry["args"] += tc["args"]
 
-            usage = _extract_usage(chunk)
-            if usage:
-                stats.prompt_tokens = usage.get("prompt_tokens", 0)
-                stats.completion_tokens = usage.get("completion_tokens", 0)
+            usage = _usage_metadata(chunk) or usage
     finally:
         spinner_stack.close()
 
-    stats.total_time = time.monotonic() - start_time
+    elapsed = time.monotonic() - start_time
     full_text = "".join(text_parts)
-
     if full_text:
         sink.stream_end()
 
-    tool_calls_raw = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
-    return full_text, tool_calls_raw, stats
+    tool_calls_raw = [
+        {
+            "id": entry["id"] or str(uuid.uuid4()),
+            "type": "function",
+            "function": {"name": entry["name"], "arguments": entry["args"]},
+        }
+        for entry in (tool_calls_by_index[i] for i in sorted(tool_calls_by_index))
+    ]
+    return full_text, tool_calls_raw, usage, elapsed, ttft
 
 
-def _extract_usage(chunk: Any) -> dict[str, int] | None:
-    """Extract token usage from a streaming chunk (typically the last one)."""
-    try:
-        usage = getattr(chunk, "usage", None) or (
-            chunk.get("usage") if isinstance(chunk, dict) else None
-        )
-        if usage is None:
-            return None
-        if hasattr(usage, "prompt_tokens"):
-            return {
-                "prompt_tokens": usage.prompt_tokens or 0,
-                "completion_tokens": usage.completion_tokens or 0,
+def _tool_calls_to_openai(tool_calls: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Convert LangChain tool calls to the OpenAI function-call shape."""
+    result: list[dict[str, Any]] = []
+    for call in tool_calls:
+        result.append(
+            {
+                "id": call.get("id") or str(uuid.uuid4()),
+                "type": "function",
+                "function": {
+                    "name": call.get("name", ""),
+                    "arguments": json.dumps(call.get("args", {})),
+                },
             }
-        if isinstance(usage, dict) and "prompt_tokens" in usage:
-            return usage
-    except (AttributeError, KeyError):
-        pass
-    return None
-
-
-def _accumulate_tool_call_deltas(
-    chunk: Any, tool_calls_by_index: dict[int, dict[str, Any]]
-) -> None:
-    """Accumulate tool call deltas from a streaming chunk.
-
-    Streaming tool calls arrive as incremental deltas indexed by position.
-    This function merges them into complete tool call dicts.
-    """
-    try:
-        choices = chunk.choices if hasattr(chunk, "choices") else chunk.get("choices", [])
-        if not choices:
-            return
-        delta = choices[0].delta if hasattr(choices[0], "delta") else choices[0].get("delta", {})
-
-        raw_tcs = (
-            delta.tool_calls
-            if hasattr(delta, "tool_calls")
-            else delta.get("tool_calls")
-            if isinstance(delta, dict)
-            else None
         )
-        if not raw_tcs:
-            return
-
-        for tc in raw_tcs:
-            idx = getattr(tc, "index", None) if hasattr(tc, "index") else tc.get("index", 0)
-            if idx is None:
-                idx = 0
-
-            if idx not in tool_calls_by_index:
-                tc_id = (getattr(tc, "id", "") if hasattr(tc, "id") else tc.get("id", "")) or str(
-                    uuid.uuid4()
-                )
-                tool_calls_by_index[idx] = {
-                    "id": tc_id,
-                    "type": "function",
-                    "function": {"name": "", "arguments": ""},
-                }
-
-            entry = tool_calls_by_index[idx]
-            func = getattr(tc, "function", None) if hasattr(tc, "function") else tc.get("function")
-
-            if func is not None:
-                fname = getattr(func, "name", None) if hasattr(func, "name") else func.get("name")
-                if fname:
-                    entry["function"]["name"] += fname
-
-                fargs = (
-                    getattr(func, "arguments", None)
-                    if hasattr(func, "arguments")
-                    else func.get("arguments")
-                )
-                if fargs:
-                    entry["function"]["arguments"] += fargs
-    except (IndexError, AttributeError, KeyError):
-        pass
+    return result
 
 
-def _parse_response(response: Any) -> tuple[str, list[dict[str, Any]]]:
-    """Parse a non-streaming LLM response into text and tool calls."""
-    try:
-        choices = response.choices if hasattr(response, "choices") else response.get("choices", [])
-        if not choices:
-            return "", []
+def _usage_metadata(message: Any) -> dict[str, int] | None:
+    """Extract token usage from a LangChain message, if reported."""
+    meta = getattr(message, "usage_metadata", None)
+    if not meta:
+        return None
+    usage: dict[str, int] = {}
+    if meta.get("input_tokens") is not None:
+        usage["prompt_tokens"] = meta["input_tokens"]
+    if meta.get("output_tokens") is not None:
+        usage["completion_tokens"] = meta["output_tokens"]
+    return usage or None
 
-        message = (
-            choices[0].message if hasattr(choices[0], "message") else choices[0].get("message", {})
-        )
 
-        content = ""
-        if hasattr(message, "content"):
-            content = message.content or ""
-        elif isinstance(message, dict):
-            content = message.get("content", "") or ""
-
-        tool_calls: list[dict[str, Any]] = []
-        raw_calls = (
-            message.tool_calls
-            if hasattr(message, "tool_calls")
-            else message.get("tool_calls")
-            if isinstance(message, dict)
-            else None
-        )
-        if raw_calls:
-            for tc in raw_calls:
-                if hasattr(tc, "function"):
-                    tool_calls.append(
-                        {
-                            "id": getattr(tc, "id", str(uuid.uuid4())),
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                    )
-                elif isinstance(tc, dict):
-                    tool_calls.append(tc)
-
-        return content, tool_calls
-    except (IndexError, AttributeError, KeyError):
-        return "", []
+def _content_text(content: Any) -> str:
+    """Extract plain text from message content (str, None, or a content block list)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and "text" in block
+        ]
+        return "\n".join(parts)
+    return ""
 
 
 def _extract_tool_calls_from_text(

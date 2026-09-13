@@ -166,12 +166,12 @@ Higher-specificity files take priority. Each file is capped at 200 lines.
 | CLI | [Typer](https://typer.tiangolo.com/) |
 | Terminal UI | [Rich](https://rich.readthedocs.io/) |
 | LLM Runtime | [Ollama](https://ollama.com) |
-| LLM Client | [LiteLLM](https://github.com/BerriAI/litellm) |
-| Structured Output | [Instructor](https://github.com/instructor-ai/instructor) |
+| LLM Client | [LangChain](https://www.langchain.com/) (`ChatOllama` / `ChatOpenAI`) |
+| Agent orchestration | [LangGraph](https://www.langchain.com/langgraph) |
 | Vector Store | [LanceDB](https://lancedb.com/) |
 | Code Parsing | [Tree-sitter](https://tree-sitter.github.io/) |
 | Config | TOML (stdlib `tomllib`) |
-| Plugins | [MCP](https://modelcontextprotocol.io/) |
+| Plugins | [MCP](https://modelcontextprotocol.io/) via `langchain-mcp-adapters` |
 
 ## Contributing
 
