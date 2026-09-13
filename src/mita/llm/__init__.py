@@ -1,1 +1,1 @@
-"""LLM client abstraction: LiteLLM + Instructor + streaming."""
+"""LLM client abstraction: LangChain chat models + streaming."""

@@ -1,15 +1,72 @@
-"""Tests for MCP plugin manager."""
+"""Tests for MCP plugin manager (LangChain-backed)."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+import asyncio
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, ConfigDict, Field
 
 from mita.config.schema import PluginDefinition
-from mita.plugins.manager import PluginManager, _make_mcp_handler, _schema_to_parameters
+from mita.plugins.manager import (
+    PluginManager,
+    _make_mcp_handler,
+    _output_text,
+    _schema_to_parameters,
+    mcp_tool_name,
+)
 from mita.tools.registry import ToolRegistry
 from mita.tools.schema import ToolResult
+
+
+class _Args(BaseModel):
+    path: str = Field(description="File path")
+
+
+class _AnyArgs(BaseModel):
+    """Accept any keyword input, so a tool can run with arbitrary arguments."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+def _tool(
+    name: str = "read_file",
+    description: str = "Read a file",
+    output: str = "done",
+    read_only: bool | None = None,
+    args_schema: type[BaseModel] | None = None,
+) -> StructuredTool:
+    """Build a StructuredTool with the surface mita reads."""
+
+    async def _run(**kwargs: Any) -> str:
+        return output
+
+    kwargs: dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "args_schema": args_schema or _AnyArgs,
+        "coroutine": _run,
+    }
+    if read_only is not None:
+        kwargs["metadata"] = {"readOnlyHint": read_only}
+    return StructuredTool(**kwargs)
+
+
+def _mock_client() -> MagicMock:
+    """Return a MultiServerMCPClient mock whose sessions yield mock sessions."""
+    client = AsyncMock()
+
+    def _session_cm(_name: str) -> AsyncMock:
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=AsyncMock())
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    client.session = MagicMock(side_effect=_session_cm)
+    return client
 
 
 class TestSchemaToParameters:
@@ -48,10 +105,8 @@ class TestSchemaToParameters:
 class TestMakeMCPHandler:
     @pytest.mark.asyncio
     async def test_success(self) -> None:
-        mock_client = AsyncMock()
-        mock_client.call_tool = AsyncMock(return_value="tool output")
-
-        handler = _make_mcp_handler(mock_client, "read_file")
+        tool = _tool(name="read_file", output="tool output")
+        handler = _make_mcp_handler(tool)
         result = await handler({"path": "/tmp/test"})
 
         assert isinstance(result, ToolResult)
@@ -60,10 +115,13 @@ class TestMakeMCPHandler:
 
     @pytest.mark.asyncio
     async def test_timeout(self) -> None:
-        mock_client = AsyncMock()
-        mock_client.call_tool = AsyncMock(side_effect=TimeoutError)
+        async def _boom(**kwargs: Any) -> str:
+            raise TimeoutError
 
-        handler = _make_mcp_handler(mock_client, "slow_tool")
+        tool = StructuredTool(
+            name="slow_tool", description="s", args_schema=_AnyArgs, coroutine=_boom
+        )
+        handler = _make_mcp_handler(tool)
         result = await handler({})
 
         assert result.success is False
@@ -71,14 +129,31 @@ class TestMakeMCPHandler:
 
     @pytest.mark.asyncio
     async def test_connection_error(self) -> None:
-        mock_client = AsyncMock()
-        mock_client.call_tool = AsyncMock(side_effect=ConnectionError("dead"))
+        async def _boom(**kwargs: Any) -> str:
+            raise ConnectionError("dead")
 
-        handler = _make_mcp_handler(mock_client, "broken_tool")
+        tool = StructuredTool(
+            name="broken_tool", description="b", args_schema=_AnyArgs, coroutine=_boom
+        )
+        handler = _make_mcp_handler(tool)
         result = await handler({})
 
         assert result.success is False
         assert "failed" in (result.error or "")
+
+
+class TestOutputText:
+    def test_binary_data_marker(self) -> None:
+        raw = [{"type": "base64", "mime_type": "image/png"}]
+        assert _output_text(raw) == "[binary data: image/png]"
+
+    def test_resource_link_marker(self) -> None:
+        raw = [{"type": "url", "url": "file:///x"}]
+        assert _output_text(raw) == "[resource: file:///x]"
+
+    def test_mixed_blocks(self) -> None:
+        raw = [{"text": "here"}, {"type": "base64", "mime_type": "image/png"}]
+        assert _output_text(raw) == "here\n[binary data: image/png]"
 
 
 class TestPluginManager:
@@ -93,41 +168,82 @@ class TestPluginManager:
         mgr = PluginManager(plugins)
         assert mgr.plugin_names == ["fs", "web"]
 
-    def test_get_client_none(self, plugins: list[PluginDefinition]) -> None:
+    @pytest.mark.asyncio
+    async def test_start_all(self) -> None:
+        plugins = [PluginDefinition(name="fs", transport="stdio", command="echo")]
         mgr = PluginManager(plugins)
-        assert mgr.get_client("fs") is None
+        with (
+            patch("mita.plugins.manager.MultiServerMCPClient", return_value=_mock_client()),
+            patch(
+                "mita.plugins.manager.load_mcp_tools",
+                new_callable=AsyncMock,
+                return_value=[_tool(name="read", output="x")],
+            ),
+        ):
+            started = await mgr.start_all()
+        assert started == ["fs"]
+        assert len(mgr._tools["fs"]) == 1
+        assert "fs" in mgr._sessions
 
     @pytest.mark.asyncio
     async def test_start_all_with_failures(self) -> None:
-        plugins = [
-            PluginDefinition(name="good", transport="stdio", command="echo"),
-            PluginDefinition(name="bad", transport="stdio"),  # missing command
-        ]
+        plugins = [PluginDefinition(name="bad", transport="stdio")]
         mgr = PluginManager(plugins)
+        started = await mgr.start_all()
+        assert started == []
+        assert mgr._tools == {}
 
-        with patch.object(mgr, "start_all", new_callable=AsyncMock, return_value=["good"]):
+    @pytest.mark.asyncio
+    async def test_start_all_tool_load_failure(self) -> None:
+        plugins = [PluginDefinition(name="fs", transport="stdio", command="echo")]
+        mgr = PluginManager(plugins)
+        with (
+            patch("mita.plugins.manager.MultiServerMCPClient", return_value=_mock_client()),
+            patch(
+                "mita.plugins.manager.load_mcp_tools",
+                new_callable=AsyncMock,
+                side_effect=ConnectionError("down"),
+            ),
+        ):
             started = await mgr.start_all()
-            assert "good" in started
+        assert started == []
+        assert "fs" not in mgr._tools
 
     @pytest.mark.asyncio
     async def test_stop_all(self) -> None:
         mgr = PluginManager([])
-        mock_client = AsyncMock()
-        mock_client.disconnect = AsyncMock()
-        mgr._clients["test"] = mock_client
+        mgr._tools["test"] = [_tool(name="x")]
+        mgr._sessions["test"] = AsyncMock()
+        exit_stack = AsyncMock()
+        exit_stack.aclose = AsyncMock()
+        mgr._exit_stacks["test"] = exit_stack
 
         await mgr.stop_all()
-        assert len(mgr._clients) == 0
-        mock_client.disconnect.assert_awaited_once()
+        assert mgr._tools == {}
+        assert mgr._sessions == {}
+        assert mgr._client is None
+        assert mgr._exit_stacks == {}
+        exit_stack.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_plugin_closes_session(self) -> None:
+        mgr = PluginManager([])
+        mgr._tools["test"] = [_tool(name="x")]
+        mgr._sessions["test"] = AsyncMock()
+        exit_stack = AsyncMock()
+        exit_stack.aclose = AsyncMock()
+        mgr._exit_stacks["test"] = exit_stack
+
+        await mgr.stop_plugin("test")
+        assert "test" not in mgr._tools
+        assert "test" not in mgr._sessions
+        assert mgr._exit_stacks == {}
+        exit_stack.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_list_tools(self) -> None:
         mgr = PluginManager([])
-        mock_client = AsyncMock()
-        mock_client.list_tools = AsyncMock(
-            return_value=[{"name": "read", "description": "Read file", "inputSchema": {}}]
-        )
-        mgr._clients["fs"] = mock_client
+        mgr._tools["fs"] = [_tool(name="read", description="Read file")]
 
         result = await mgr.list_tools()
         assert "fs" in result
@@ -137,10 +253,8 @@ class TestPluginManager:
     @pytest.mark.asyncio
     async def test_list_tools_single_plugin(self) -> None:
         mgr = PluginManager([])
-        mock_client = AsyncMock()
-        mock_client.list_tools = AsyncMock(return_value=[])
-        mgr._clients["fs"] = mock_client
-        mgr._clients["web"] = AsyncMock()
+        mgr._tools["fs"] = [_tool(name="read")]
+        mgr._tools["web"] = [_tool(name="search")]
 
         result = await mgr.list_tools("fs")
         assert "fs" in result
@@ -149,21 +263,7 @@ class TestPluginManager:
     @pytest.mark.asyncio
     async def test_register_tools(self) -> None:
         mgr = PluginManager([])
-        mock_client = AsyncMock()
-        mock_client.list_tools = AsyncMock(
-            return_value=[
-                {
-                    "name": "read_file",
-                    "description": "Read a file",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {"path": {"type": "string", "description": "path"}},
-                        "required": ["path"],
-                    },
-                }
-            ]
-        )
-        mgr._clients["fs"] = mock_client
+        mgr._tools["fs"] = [_tool(name="read_file", description="Read a file", args_schema=_Args)]
 
         registry = ToolRegistry()
         count = await mgr.register_tools(registry)
@@ -176,6 +276,35 @@ class TestPluginManager:
         assert len(defn.parameters) == 1
 
     @pytest.mark.asyncio
+    async def test_register_tools_dict_args_schema(self) -> None:
+        """langchain-mcp-adapters passes the inputSchema dict through (finding #2)."""
+
+        async def _run(**kwargs: Any) -> str:
+            return "ok"
+
+        dict_tool = StructuredTool(
+            name="read",
+            description="Read",
+            args_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            coroutine=_run,
+        )
+        mgr = PluginManager([])
+        mgr._tools["fs"] = [dict_tool]
+
+        registry = ToolRegistry()
+        count = await mgr.register_tools(registry)
+
+        assert count == 1
+        defn = registry.get_definition("mcp_fs_read")
+        assert defn is not None
+        assert len(defn.parameters) == 1
+        assert defn.parameters[0].name == "path"
+
+    @pytest.mark.asyncio
     async def test_test_plugin_not_started(self) -> None:
         mgr = PluginManager([])
         result = await mgr.test_plugin("missing")
@@ -184,40 +313,79 @@ class TestPluginManager:
     @pytest.mark.asyncio
     async def test_test_plugin_healthy(self) -> None:
         mgr = PluginManager([])
-        mock_client = AsyncMock()
-        mock_client.ping = AsyncMock(return_value=True)
-        mock_client.list_tools = AsyncMock(
-            return_value=[{"name": "tool1", "description": "desc", "inputSchema": {}}]
-        )
-        mgr._clients["fs"] = mock_client
+        mgr._tools["fs"] = [_tool(name="tool1")]
+        session = AsyncMock()
+        session.send_ping = AsyncMock(return_value=None)
+        mgr._sessions["fs"] = session
 
         result = await mgr.test_plugin("fs")
         assert result["ping"] is True
         assert result["tools"] == 1
+        session.send_ping.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_test_plugin_ping_failed(self) -> None:
         mgr = PluginManager([])
-        mock_client = AsyncMock()
-        mock_client.ping = AsyncMock(return_value=False)
-        mgr._clients["fs"] = mock_client
+        mgr._tools["fs"] = [_tool(name="tool1")]
+        session = AsyncMock()
+        session.send_ping = AsyncMock(side_effect=ConnectionError("down"))
+        mgr._sessions["fs"] = session
 
         result = await mgr.test_plugin("fs")
         assert result["ping"] is False
 
     @pytest.mark.asyncio
+    async def test_test_plugin_ping_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import mita.plugins.manager as pm
+
+        monkeypatch.setattr(pm, "_MCP_PING_TIMEOUT", 0.01)
+        mgr = PluginManager([])
+        mgr._tools["fs"] = [_tool(name="tool1")]
+        session = AsyncMock()
+
+        async def _slow() -> None:
+            await asyncio.sleep(1)
+
+        session.send_ping = _slow
+        mgr._sessions["fs"] = session
+
+        result = await mgr.test_plugin("fs")
+        assert result["ping"] is False
+
+    @pytest.mark.asyncio
+    async def test_start_plugin_failure_rolls_back_connection(self) -> None:
+        plugin = PluginDefinition(name="test", transport="stdio", command="echo")
+        mgr = PluginManager([plugin])
+        mock_client = _mock_client()
+        mock_client.connections = {}
+        with (
+            patch("mita.plugins.manager.MultiServerMCPClient", return_value=mock_client),
+            patch(
+                "mita.plugins.manager.load_mcp_tools",
+                new_callable=AsyncMock,
+                side_effect=ConnectionError("down"),
+            ),
+        ):
+            result = await mgr.start_plugin("test")
+        assert result is False
+        assert "test" not in mock_client.connections
+
+    @pytest.mark.asyncio
     async def test_start_plugin(self) -> None:
         plugin = PluginDefinition(name="test", transport="stdio", command="echo")
         mgr = PluginManager([plugin])
-
-        with patch("mita.plugins.manager.MCPPluginClient") as mock_cls:
-            mock_instance = AsyncMock()
-            mock_instance.connect = AsyncMock()
-            mock_cls.return_value = mock_instance
-
+        with (
+            patch("mita.plugins.manager.MultiServerMCPClient", return_value=_mock_client()),
+            patch(
+                "mita.plugins.manager.load_mcp_tools",
+                new_callable=AsyncMock,
+                return_value=[_tool(name="x")],
+            ),
+        ):
             result = await mgr.start_plugin("test")
-            assert result is True
-            assert mgr.get_client("test") is mock_instance
+        assert result is True
+        assert "test" in mgr._tools
+        assert "test" in mgr._sessions
 
     @pytest.mark.asyncio
     async def test_start_plugin_not_configured(self) -> None:
@@ -228,33 +396,20 @@ class TestPluginManager:
     @pytest.mark.asyncio
     async def test_stop_plugin(self) -> None:
         mgr = PluginManager([])
-        mock_client = AsyncMock()
-        mock_client.disconnect = AsyncMock()
-        mgr._clients["test"] = mock_client
+        mgr._tools["test"] = [_tool(name="x")]
+        mgr._sessions["test"] = AsyncMock()
 
         await mgr.stop_plugin("test")
-        assert mgr.get_client("test") is None
-        mock_client.disconnect.assert_awaited_once()
+        assert "test" not in mgr._tools
+        assert "test" not in mgr._sessions
 
     @pytest.mark.asyncio
     async def test_tool_execution_via_registry(self) -> None:
         """End-to-end: register MCP tool, then execute via registry."""
         mgr = PluginManager([])
-        mock_client = AsyncMock()
-        mock_client.list_tools = AsyncMock(
-            return_value=[
-                {
-                    "name": "greet",
-                    "description": "Greet someone",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {"name": {"type": "string", "description": "Name"}},
-                    },
-                }
-            ]
-        )
-        mock_client.call_tool = AsyncMock(return_value="Hello, World!")
-        mgr._clients["greeter"] = mock_client
+        mgr._tools["greeter"] = [
+            _tool(name="greet", description="Greet someone", output="Hello, World!")
+        ]
 
         registry = ToolRegistry()
         await mgr.register_tools(registry)
@@ -271,20 +426,6 @@ class TestPluginManager:
 class TestMCPToolConfirmation:
     """Audit finding C2: plugin tools must pass through the confirmation gate."""
 
-    @staticmethod
-    def _client_with_tool(read_only_hint: object) -> AsyncMock:
-        tool: dict[str, object] = {
-            "name": "do_thing",
-            "description": "Does a thing",
-            "inputSchema": {"type": "object", "properties": {}},
-        }
-        if read_only_hint is not None:
-            tool["readOnlyHint"] = read_only_hint
-        client = AsyncMock()
-        client.list_tools = AsyncMock(return_value=[tool])
-        client.call_tool = AsyncMock(return_value="done")
-        return client
-
     @pytest.mark.asyncio
     async def test_plugin_tool_defaults_destructive_and_confirms(self) -> None:
         from mita.config.schema import ToolSettings
@@ -292,7 +433,7 @@ class TestMCPToolConfirmation:
         from mita.tools.schema import ToolCall
 
         mgr = PluginManager([])
-        mgr._clients["srv"] = self._client_with_tool(read_only_hint=None)
+        mgr._tools["srv"] = [_tool(name="do_thing", output="done", read_only=None)]
         registry = ToolRegistry()
         await mgr.register_tools(registry)
 
@@ -323,7 +464,7 @@ class TestMCPToolConfirmation:
         from mita.tools.schema import ToolCall
 
         mgr = PluginManager([])
-        mgr._clients["srv"] = self._client_with_tool(read_only_hint=True)
+        mgr._tools["srv"] = [_tool(name="do_thing", output="done", read_only=True)]
         registry = ToolRegistry()
         await mgr.register_tools(registry)
 
@@ -346,15 +487,11 @@ class TestMcpToolName:
     """Audit finding: mcp: tool names must be OpenAI-function-name safe."""
 
     def test_sanitizes_colon_and_slash(self) -> None:
-        from mita.plugins.manager import mcp_tool_name
-
         name = mcp_tool_name("my-server", "read/file")
         assert name == "mcp_my-server_read_file"
         assert all(c.isalnum() or c in "_-" for c in name)
 
     def test_truncates_and_hashes_long_names(self) -> None:
-        from mita.plugins.manager import mcp_tool_name
-
         name = mcp_tool_name("p" * 50, "t" * 50)
         assert len(name) <= 64
         assert all(c.isalnum() or c in "_-" for c in name)

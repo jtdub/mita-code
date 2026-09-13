@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sessions.max_age_days` (default 7) are pruned at chat start; configure via the new
   `[sessions]` config section (`autosave`, `max_age_days`).
 
+### Changed
+
+- LLM calls now route through LangChain (`ChatOllama`/`ChatOpenAI`) and embeddings through
+  `OllamaEmbeddings`/`OpenAIEmbeddings`; the LiteLLM dependency is removed.
+- The agent loop now runs as a LangGraph state graph.
+- MCP plugins now connect through `langchain-mcp-adapters`; the direct `mcp` dependency is
+  removed.
+
 ## [0.1.0] - 2026-03-09
 
 ### Added
