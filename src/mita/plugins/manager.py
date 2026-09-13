@@ -21,21 +21,17 @@ from mita.tools.schema import ToolDefinition, ToolParameter, ToolResult
 
 _logger = logging.getLogger(__name__)
 
-# Timeout for a single MCP tool call (the old client applied the same bound).
 _MCP_CALL_TIMEOUT = 120.0
+"""Seconds a single MCP tool call may take before it is abandoned."""
 
-_mcp_default_env: Any | None
-try:
-    # Minimal, safe environment allowlist (PATH/HOME/etc.) provided by the MCP SDK.
-    from mcp.client.stdio import get_default_environment as _mcp_default_env
-except ImportError:  # pragma: no cover - depends on mcp version
-    _mcp_default_env = None
-
-# Only these variables are passed through to plugin subprocesses when the SDK
-# helper is unavailable. Everything else (tokens, keys, agent sockets) is dropped.
 _ENV_ALLOWLIST: frozenset[str] = frozenset(
     {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR", "PATHEXT"}
 )
+"""The only variables a plugin subprocess inherits.
+
+Everything else (tokens, keys, agent sockets) is dropped. Mita owns this list so
+that the set does not change with the version of a transitive package.
+"""
 
 
 def mcp_tool_name(plugin: str, tool: str) -> str:
@@ -56,7 +52,11 @@ def mcp_tool_name(plugin: str, tool: str) -> str:
 
 
 def _schema_to_parameters(input_schema: dict[str, Any]) -> list[ToolParameter]:
-    """Convert a JSON Schema inputSchema to a list of ToolParameter."""
+    """Convert a JSON Schema inputSchema to a list of ToolParameter.
+
+    Each parameter keeps its full property schema, so enum, items, and nested
+    objects survive.
+    """
     properties = input_schema.get("properties", {})
     required = set(input_schema.get("required", []))
     params: list[ToolParameter] = []
@@ -69,7 +69,6 @@ def _schema_to_parameters(input_schema: dict[str, Any]) -> list[ToolParameter]:
                 description=prop.get("description", ""),
                 required=name in required,
                 default=prop.get("default"),
-                # Preserve the full property schema (enum/items/nested) for MCP tools.
                 json_schema=prop if isinstance(prop, dict) else None,
             )
         )
@@ -96,31 +95,14 @@ class PluginManager:
         return [p.name for p in self._plugins]
 
     async def start_all(self, console: Console | None = None) -> list[str]:
-        """Start all configured plugins. Returns list of successfully started plugin names."""
-        connections: dict[str, dict[str, Any]] = {}
-        for plugin in self._plugins:
-            try:
-                connections[plugin.name] = _build_connection(plugin)
-            except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
-                # A misconfigured plugin must never abort startup.
-                if console:
-                    console.print(f"[yellow]Plugin '{plugin.name}' failed to start: {e}[/yellow]")
+        """Start every configured plugin. Return the names that started.
 
-        if not connections:
-            self._client = None
-            return []
-
-        self._client = MultiServerMCPClient(cast(Any, connections), handle_tool_errors=False)
-        self._exit_stack = AsyncExitStack()
-
+        One misconfigured or unreachable plugin must never abort startup.
+        """
         started: list[str] = []
-        for name in connections:
-            try:
-                await self._connect_plugin(name)
-                started.append(name)
-            except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
-                if console:
-                    console.print(f"[yellow]Plugin '{name}' failed to start: {e}[/yellow]")
+        for plugin in self._plugins:
+            if await self.start_plugin(plugin.name, console):
+                started.append(plugin.name)
         return started
 
     async def stop_all(self) -> None:
@@ -151,7 +133,7 @@ class PluginManager:
             return True
         except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
             if console:
-                console.print(f"[red]Plugin '{name}' failed to start: {e}[/red]")
+                console.print(f"[yellow]Plugin '{name}' failed to start: {e}[/yellow]")
             return False
 
     async def stop_plugin(self, name: str) -> None:
@@ -188,25 +170,21 @@ class PluginManager:
         """Register all MCP plugin tools into a ToolRegistry.
 
         Must be called after start_all(). Returns the number of tools registered.
+
+        A third-party plugin tool counts as destructive, and so needs confirmation,
+        unless the server declares readOnlyHint=True (audit finding C2).
         """
         count = 0
         for pname, tools in self._tools.items():
             for tool in tools:
-                tool_name = mcp_tool_name(pname, tool.name)
-                # A third-party plugin tool is treated as destructive (requires
-                # confirmation) UNLESS it explicitly declares readOnlyHint=True.
-                # Without this, plugin tools defaulted to non-destructive and ran
-                # with no confirmation at all (audit finding C2).
-                read_only = _read_only(tool)
                 definition = ToolDefinition(
-                    name=tool_name,
+                    name=mcp_tool_name(pname, tool.name),
                     description=tool.description or "",
                     parameters=_schema_to_parameters(_tool_schema(tool)),
                     source=f"mcp:{pname}",
-                    destructive=not read_only,
+                    destructive=not _read_only(tool),
                 )
-                handler = _make_mcp_handler(tool, tool.name)
-                registry.register(definition, handler)
+                registry.register(definition, _make_mcp_handler(tool))
                 count += 1
         return count
 
@@ -256,14 +234,13 @@ def _build_connection(plugin: PluginDefinition) -> dict[str, Any]:
 
 
 def _plugin_env(plugin: PluginDefinition) -> dict[str, str]:
-    """Return a safe env allowlist for a plugin subprocess, plus its declared vars.
+    """Return the allowed environment for a plugin subprocess, plus its declared vars.
 
-    Do NOT inherit the full parent environment: that leaks credentials
-    (GITHUB_TOKEN, AWS_*, SSH sockets) to every third-party plugin subprocess
+    A plugin subprocess must not inherit the full parent environment. That leaks
+    credentials (GITHUB_TOKEN, AWS_*, SSH sockets) to every third-party plugin
     (audit finding C1).
     """
-    base = _mcp_default_env() if _mcp_default_env is not None else _minimal_env()
-    return {**base, **plugin.env}
+    return {**_minimal_env(), **plugin.env}
 
 
 def _minimal_env() -> dict[str, str]:
@@ -278,12 +255,14 @@ def _read_only(tool: BaseTool) -> bool:
 
 
 def _tool_schema(tool: BaseTool) -> dict[str, Any]:
-    """Return the JSON Schema for a LangChain tool's arguments."""
+    """Return the JSON Schema for a LangChain tool's arguments.
+
+    langchain-mcp-adapters passes the raw JSON-Schema dict through, not a Pydantic
+    model, so both shapes must work.
+    """
     args_schema: Any = tool.args_schema
     if args_schema is None:
         return {}
-    # langchain-mcp-adapters passes the raw JSON-Schema dict through (tools.py),
-    # not a Pydantic model; both shapes must work (finding: dict args_schema).
     if isinstance(args_schema, dict):
         return args_schema
     schema: dict[str, Any] = args_schema.model_json_schema()
@@ -300,8 +279,12 @@ def _tool_info(tool: BaseTool) -> dict[str, Any]:
     }
 
 
-def _make_mcp_handler(tool: BaseTool, remote_tool_name: str) -> ToolHandler:
-    """Create a tool handler that dispatches to a LangChain MCP tool."""
+def _make_mcp_handler(tool: BaseTool) -> ToolHandler:
+    """Create a tool handler that dispatches to a LangChain MCP tool.
+
+    A failing plugin tool must not abort the turn, so every error becomes a
+    failed ToolResult.
+    """
 
     async def handler(args: dict[str, Any]) -> ToolResult:
         try:
@@ -311,13 +294,13 @@ def _make_mcp_handler(tool: BaseTool, remote_tool_name: str) -> ToolHandler:
             return ToolResult(
                 tool_call_id="",
                 success=False,
-                error=f"MCP tool '{remote_tool_name}' timed out",
+                error=f"MCP tool '{tool.name}' timed out",
             )
-        except Exception as e:  # noqa: BLE001 - a failing plugin tool must not abort the turn
+        except Exception as e:  # noqa: BLE001
             return ToolResult(
                 tool_call_id="",
                 success=False,
-                error=f"MCP tool '{remote_tool_name}' failed: {e}",
+                error=f"MCP tool '{tool.name}' failed: {e}",
             )
 
     return handler

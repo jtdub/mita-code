@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import re
 import time
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 from rich.console import Console
 
@@ -45,7 +47,6 @@ class _AgentState(TypedDict):
     bound_model: Any
     last_tool_sig: str | None
     iteration: int
-    stop: bool
     stop_reason: str | None
 
 
@@ -113,14 +114,12 @@ async def run_agent(
         "bound_model": bound_model,
         "last_tool_sig": None,
         "iteration": 0,
-        "stop": False,
         "stop_reason": None,
     }
 
     final_state: Any = state
     try:
-        compiled = _build_graph().compile()
-        final_state = await cast(Any, compiled).ainvoke(state)
+        final_state = await cast(Any, _compiled_graph()).ainvoke(state)
     except (KeyboardInterrupt, asyncio.CancelledError):
         sink.error("[Interrupted]")
     except Exception as e:  # noqa: BLE001 - a failing tool must not kill the turn
@@ -157,8 +156,22 @@ def _build_graph() -> StateGraph[_AgentState]:
     return graph
 
 
+@functools.cache
+def _compiled_graph() -> Any:
+    """Return the compiled agent graph.
+
+    The graph is static: every per-turn value travels in the state, so one
+    compiled graph serves every turn.
+    """
+    return _build_graph().compile()
+
+
 async def _retrieve_node(state: _AgentState) -> dict[str, Any]:
-    """Inject RAG context for the latest user message, replacing the previous one."""
+    """Inject RAG context for the latest user message, replacing the previous one.
+
+    Retrieval is optional. Embedding backends raise provider-specific errors, so
+    every failure degrades to a turn without context.
+    """
     config = state["config"]
     conversation = state["conversation"]
     if not config.index.enabled:
@@ -168,28 +181,33 @@ async def _retrieve_node(state: _AgentState) -> dict[str, Any]:
         from mita.index.retriever import Retriever
 
         retriever = Retriever(config)
-        if retriever.is_available():
-            user_texts = [m.content for m in conversation.messages if m.role == Role.USER]
-            if user_texts:
-                rag_context = await retriever.retrieve_formatted(user_texts[-1])
-                if rag_context:
-                    conversation.messages = [
-                        m
-                        for m in conversation.messages
-                        if not (m.role == Role.SYSTEM and m.content.startswith(_RAG_CONTEXT_PREFIX))
-                    ]
-                    conversation.add(
-                        Message(
-                            role=Role.SYSTEM,
-                            content=f"{_RAG_CONTEXT_PREFIX}\n{rag_context}",
-                        )
-                    )
-    except Exception:  # noqa: BLE001 - RAG is optional; never let it abort the turn
-        # Broad by design: embedding backends raise provider-specific errors
-        # (ollama.ResponseError, httpx.HTTPError, ...) that must degrade, not crash.
+        latest_user_text = _latest_user_text(conversation)
+        if retriever.is_available() and latest_user_text is not None:
+            rag_context = await retriever.retrieve_formatted(latest_user_text)
+            if rag_context:
+                _replace_rag_context(conversation, rag_context)
+    except Exception:  # noqa: BLE001
         _logger.warning("RAG index unavailable, proceeding without it", exc_info=True)
 
     return {}
+
+
+def _latest_user_text(conversation: Conversation) -> str | None:
+    """Return the content of the most recent user message, or None."""
+    return next(
+        (m.content for m in reversed(conversation.messages) if m.role == Role.USER),
+        None,
+    )
+
+
+def _replace_rag_context(conversation: Conversation, rag_context: str) -> None:
+    """Drop the previous retrieved-code system message and append the new one."""
+    conversation.messages = [
+        m
+        for m in conversation.messages
+        if not (m.role == Role.SYSTEM and m.content.startswith(_RAG_CONTEXT_PREFIX))
+    ]
+    conversation.add(Message(role=Role.SYSTEM, content=f"{_RAG_CONTEXT_PREFIX}\n{rag_context}"))
 
 
 async def _model_node(state: _AgentState) -> dict[str, Any]:
@@ -221,7 +239,7 @@ async def _model_node(state: _AgentState) -> dict[str, Any]:
                 response = await bound_model.ainvoke(messages)
             elapsed = time.monotonic() - t0
             if isinstance(response, AIMessage):
-                assistant_text = _content_text(response.content)
+                assistant_text = str(response.text)
                 tool_calls_raw = _tool_calls_to_openai(response.tool_calls)
                 usage = _usage_metadata(response)
             if assistant_text:
@@ -238,42 +256,24 @@ async def _model_node(state: _AgentState) -> dict[str, Any]:
         sink.error("[Interrupted]")
         if assistant_text:
             conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-        return _stop(state, conversation, iteration, "interrupted")
-    except (ConnectionError, TimeoutError, OSError) as e:
-        _logger.warning("LLM call failed: %s", e, exc_info=True)
-        sink.error(f"LLM error: {e}")
-        if assistant_text:
-            conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-        return _stop(state, conversation, iteration, "error")
+        return _stop(iteration, "interrupted")
     except Exception as e:  # noqa: BLE001
-        _logger.error("Unexpected error in agent loop: %s", e, exc_info=True)
-        sink.error(f"Unexpected error: {e}")
+        _report_model_error(e, sink)
         if assistant_text:
             conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-        return _stop(state, conversation, iteration, "error")
+        return _stop(iteration, "error")
 
-    # Fallback: parse tool calls from text if the model didn't use native calling.
     if not tool_calls_raw and assistant_text:
         parsed, remaining = _extract_tool_calls_from_text(assistant_text, registry)
         if parsed:
             tool_calls_raw = parsed
             assistant_text = remaining
 
-    # Detect a repeated identical tool-call batch and stop before it runs again.
-    last_sig = state["last_tool_sig"]
-    if tool_calls_raw:
-        sig = json.dumps(
-            [
-                (tc.get("function", {}).get("name"), tc.get("function", {}).get("arguments"))
-                for tc in tool_calls_raw
-            ],
-            sort_keys=True,
-        )
-        if sig == state["last_tool_sig"]:
-            sink.error("Detected repeated tool call — stopping to avoid infinite loop.")
-            conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
-            return _stop(state, conversation, iteration, "repeat")
-        last_sig = sig
+    signature = _tool_call_signature(tool_calls_raw)
+    if signature is not None and signature == state["last_tool_sig"]:
+        sink.error("Detected repeated tool call — stopping to avoid infinite loop.")
+        conversation.add(Message(role=Role.ASSISTANT, content=assistant_text))
+        return _stop(iteration, "repeat")
 
     conversation.add(
         Message(
@@ -283,26 +283,42 @@ async def _model_node(state: _AgentState) -> dict[str, Any]:
         )
     )
 
-    stop = iteration >= config.max_iterations
     return {
-        "conversation": conversation,
-        "last_tool_sig": last_sig,
+        "last_tool_sig": signature or state["last_tool_sig"],
         "iteration": iteration,
-        "stop": stop,
-        "stop_reason": "max_iterations" if stop else None,
+        "stop_reason": "max_iterations" if iteration >= config.max_iterations else None,
     }
 
 
-def _stop(
-    state: _AgentState, conversation: Conversation, iteration: int, reason: str
-) -> dict[str, Any]:
+def _report_model_error(error: Exception, sink: UISink) -> None:
+    """Log a failed model call and show it, naming transport faults separately."""
+    if isinstance(error, ConnectionError | TimeoutError | OSError):
+        _logger.warning("LLM call failed: %s", error, exc_info=True)
+        sink.error(f"LLM error: {error}")
+    else:
+        _logger.error("Unexpected error in agent loop: %s", error, exc_info=True)
+        sink.error(f"Unexpected error: {error}")
+
+
+def _tool_call_signature(tool_calls_raw: list[dict[str, Any]]) -> str | None:
+    """Return a stable key for a tool-call batch, or None when the batch is empty.
+
+    Two turns that produce the same key mean the model is repeating itself.
+    """
+    if not tool_calls_raw:
+        return None
+    return json.dumps(
+        [
+            (tc.get("function", {}).get("name"), tc.get("function", {}).get("arguments"))
+            for tc in tool_calls_raw
+        ],
+        sort_keys=True,
+    )
+
+
+def _stop(iteration: int, reason: str) -> dict[str, Any]:
     """Build a state update that halts the graph."""
-    return {
-        "conversation": conversation,
-        "iteration": iteration,
-        "stop": True,
-        "stop_reason": reason,
-    }
+    return {"iteration": iteration, "stop_reason": reason}
 
 
 async def _tools_node(state: _AgentState) -> dict[str, Any]:
@@ -319,7 +335,7 @@ async def _tools_node(state: _AgentState) -> dict[str, Any]:
         auto_confirm=state["auto_confirm"],
         console=state["console"],
     )
-    return {"conversation": conversation}
+    return {}
 
 
 def _route_after_model(state: _AgentState) -> str:
@@ -332,7 +348,7 @@ def _route_after_model(state: _AgentState) -> str:
 
 def _route_after_tools(state: _AgentState) -> str:
     """Return to the model unless a stop condition was set."""
-    return "end" if state["stop"] else "model"
+    return "end" if state["stop_reason"] else "model"
 
 
 async def _stream_model(
@@ -342,11 +358,6 @@ async def _stream_model(
 ) -> tuple[str, list[dict[str, Any]], dict[str, int] | None, float, float | None]:
     """Stream the model response, displaying tokens as they arrive.
 
-    Tool calls are read from the merged ``AIMessageChunk`` so that a batch of
-    calls arriving in one chunk (with ``index`` unset) stays separate — keying
-    on the chunk index collapses them into one (finding: streamed tool-call
-    merge).
-
     Returns:
         Tuple of (text_content, tool_calls_raw, usage, elapsed, ttft).
     """
@@ -355,7 +366,7 @@ async def _stream_model(
     first_token = True
     start_time = time.monotonic()
     ttft: float | None = None
-    accumulated: AIMessageChunk | None = None
+    pending_calls: dict[Any, _PendingToolCall] = {}
 
     spinner_stack = contextlib.ExitStack()
     spinner_stack.enter_context(sink.busy("Thinking..."))
@@ -367,9 +378,9 @@ async def _stream_model(
                 ttft = time.monotonic() - start_time
                 first_token = False
 
-            accumulated = chunk if accumulated is None else accumulated + chunk
+            _merge_tool_call_chunks(pending_calls, chunk)
 
-            text = _content_text(chunk.content)
+            text = str(chunk.text)
             if text:
                 text_parts.append(text)
                 sink.stream_token(text)
@@ -383,27 +394,63 @@ async def _stream_model(
     if full_text:
         sink.stream_end()
 
-    tool_calls_raw = _tool_calls_to_openai(accumulated.tool_calls) if accumulated else []
+    tool_calls_raw = [call.to_openai() for call in pending_calls.values()]
     return full_text, tool_calls_raw, usage, elapsed, ttft
+
+
+@dataclass
+class _PendingToolCall:
+    """One tool call under construction from a stream of fragments."""
+
+    call_id: str | None = None
+    name_parts: list[str] = field(default_factory=list)
+    argument_parts: list[str] = field(default_factory=list)
+
+    def to_openai(self) -> dict[str, Any]:
+        """Return the finished call in the OpenAI function-call shape."""
+        return _openai_tool_call(
+            "".join(self.name_parts), "".join(self.argument_parts), self.call_id
+        )
+
+
+def _merge_tool_call_chunks(pending: dict[Any, _PendingToolCall], chunk: Any) -> None:
+    """Add one stream chunk's tool-call fragments to the calls under construction.
+
+    A backend that sends a whole call in one chunk leaves ``index`` unset, so the
+    fragment id keys the call and a batch stays separate. A backend that splits a
+    call across chunks numbers them, so ``index`` keys the call.
+    """
+    for fragment in getattr(chunk, "tool_call_chunks", None) or []:
+        index = fragment.get("index")
+        key = index if index is not None else fragment.get("id") or 0
+        call = pending.setdefault(key, _PendingToolCall())
+        if fragment.get("id"):
+            call.call_id = fragment["id"]
+        if fragment.get("name"):
+            call.name_parts.append(fragment["name"])
+        if fragment.get("args"):
+            call.argument_parts.append(fragment["args"])
+
+
+def _openai_tool_call(name: str, arguments: str, call_id: str | None = None) -> dict[str, Any]:
+    """Build one tool call in the OpenAI function-call shape.
+
+    An empty argument set becomes "{}". An empty string fails to parse on the
+    next request.
+    """
+    return {
+        "id": call_id or str(uuid.uuid4()),
+        "type": "function",
+        "function": {"name": name, "arguments": arguments or "{}"},
+    }
 
 
 def _tool_calls_to_openai(tool_calls: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Convert LangChain tool calls to the OpenAI function-call shape."""
-    result: list[dict[str, Any]] = []
-    for call in tool_calls:
-        result.append(
-            {
-                "id": call.get("id") or str(uuid.uuid4()),
-                "type": "function",
-                "function": {
-                    "name": call.get("name", ""),
-                    # An empty argument set must become "{}", not "", or the next
-                    # request fails to parse it (finding: empty tool arguments).
-                    "arguments": json.dumps(call.get("args") or {}),
-                },
-            }
-        )
-    return result
+    return [
+        _openai_tool_call(call.get("name", ""), json.dumps(call.get("args") or {}), call.get("id"))
+        for call in tool_calls
+    ]
 
 
 def _usage_metadata(message: Any) -> dict[str, int] | None:
@@ -417,20 +464,6 @@ def _usage_metadata(message: Any) -> dict[str, int] | None:
     if meta.get("output_tokens") is not None:
         usage["completion_tokens"] = meta["output_tokens"]
     return usage or None
-
-
-def _content_text(content: Any) -> str:
-    """Extract plain text from message content (str, None, or a content block list)."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and "text" in block
-        ]
-        return "\n".join(parts)
-    return ""
 
 
 def _extract_tool_calls_from_text(
@@ -475,16 +508,7 @@ def _extract_tool_calls_from_text(
         name = obj.get("name", "")
         arguments = obj.get("arguments", obj.get("params", {}))
         if name and registry.has_tool(name) and isinstance(arguments, dict):
-            tool_calls.append(
-                {
-                    "id": str(uuid.uuid4()),
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": json.dumps(arguments),
-                    },
-                }
-            )
+            tool_calls.append(_openai_tool_call(name, json.dumps(arguments)))
         else:
             remaining_parts.append(normalized[start:end])
 

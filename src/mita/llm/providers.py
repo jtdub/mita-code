@@ -11,33 +11,77 @@ from dataclasses import dataclass
 
 from mita.config.schema import LLMProvider, MitaConfig
 
-# OpenAI clients require a non-empty api_key, even when the local server needs no
-# auth. Substitute this when the user left api_key empty.
 API_KEY_PLACEHOLDER = "sk-no-key-required"
+"""Stand-in key for a local server that needs no auth.
+
+OpenAI clients reject an empty api_key, so this is substituted when the user
+left api_key empty.
+"""
 
 
 @dataclass(frozen=True)
 class ProviderSpec:
     """Static routing facts for one backend."""
 
-    is_ollama: bool  # uses the native Ollama API and daemon management
+    is_ollama: bool
+    """True when the backend uses the native Ollama API and daemon management."""
+
     default_base_url: str
-    has_model_registry: bool  # can pull/list models (Ollama only)
-    needs_api_key_placeholder: bool  # openai-routed clients require a non-empty key
-    context_probe: str  # "ollama_show" | "openai_models" | "llamacpp_props" | "none"
+    """Base URL used when the user set no `[llm] base_url`."""
+
+    has_model_registry: bool
+    """True when the backend can pull and list models. Ollama only."""
+
+    needs_api_key_placeholder: bool
+    """True when the OpenAI-routed client requires a non-empty key."""
+
+    context_probe: str
+    """One of "ollama_show", "openai_models", "llamacpp_props", or "none"."""
 
 
 PROVIDERS: dict[LLMProvider, ProviderSpec] = {
-    LLMProvider.OLLAMA: ProviderSpec(True, "http://localhost:11434", True, False, "ollama_show"),
+    LLMProvider.OLLAMA: ProviderSpec(
+        is_ollama=True,
+        default_base_url="http://localhost:11434",
+        has_model_registry=True,
+        needs_api_key_placeholder=False,
+        context_probe="ollama_show",
+    ),
     LLMProvider.LLAMACPP: ProviderSpec(
-        False, "http://localhost:8080/v1", False, True, "llamacpp_props"
+        is_ollama=False,
+        default_base_url="http://localhost:8080/v1",
+        has_model_registry=False,
+        needs_api_key_placeholder=True,
+        context_probe="llamacpp_props",
     ),
     LLMProvider.VLLM: ProviderSpec(
-        False, "http://localhost:8000/v1", False, False, "openai_models"
+        is_ollama=False,
+        default_base_url="http://localhost:8000/v1",
+        has_model_registry=False,
+        needs_api_key_placeholder=False,
+        context_probe="openai_models",
     ),
-    LLMProvider.LMSTUDIO: ProviderSpec(False, "http://localhost:1234/v1", False, False, "none"),
-    LLMProvider.TGI: ProviderSpec(False, "http://localhost:8080/v1", False, True, "none"),
-    LLMProvider.OPENAI_COMPATIBLE: ProviderSpec(False, "", False, True, "none"),
+    LLMProvider.LMSTUDIO: ProviderSpec(
+        is_ollama=False,
+        default_base_url="http://localhost:1234/v1",
+        has_model_registry=False,
+        needs_api_key_placeholder=False,
+        context_probe="none",
+    ),
+    LLMProvider.TGI: ProviderSpec(
+        is_ollama=False,
+        default_base_url="http://localhost:8080/v1",
+        has_model_registry=False,
+        needs_api_key_placeholder=True,
+        context_probe="none",
+    ),
+    LLMProvider.OPENAI_COMPATIBLE: ProviderSpec(
+        is_ollama=False,
+        default_base_url="",
+        has_model_registry=False,
+        needs_api_key_placeholder=True,
+        context_probe="none",
+    ),
 }
 
 

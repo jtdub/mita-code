@@ -22,12 +22,10 @@ class EmbeddingClient:
 
     def __init__(self, config: MitaConfig) -> None:
         self._model = config.model.embedding
-        self._backend = resolve_backend(config)
+        self._is_ollama = resolve_backend(config).is_ollama
         self._embeddings: Embeddings = build_embedding_model(config)
         self._timeout = config.ollama.timeout
-        # Only Ollama exposes a model registry; the client is used for the
-        # availability check, not for embedding.
-        self._ollama = ollama.AsyncClient(host=config.ollama.host) if self.is_ollama else None
+        self._ollama = ollama.AsyncClient(host=config.ollama.host) if self._is_ollama else None
 
     @property
     def model(self) -> str:
@@ -35,7 +33,7 @@ class EmbeddingClient:
 
     @property
     def is_ollama(self) -> bool:
-        return self._backend.is_ollama
+        return self._is_ollama
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for a batch of texts."""

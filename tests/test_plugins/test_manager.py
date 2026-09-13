@@ -104,7 +104,7 @@ class TestMakeMCPHandler:
     @pytest.mark.asyncio
     async def test_success(self) -> None:
         tool = _tool(name="read_file", output="tool output")
-        handler = _make_mcp_handler(tool, "read_file")
+        handler = _make_mcp_handler(tool)
         result = await handler({"path": "/tmp/test"})
 
         assert isinstance(result, ToolResult)
@@ -119,7 +119,7 @@ class TestMakeMCPHandler:
         tool = StructuredTool(
             name="slow_tool", description="s", args_schema=_AnyArgs, coroutine=_boom
         )
-        handler = _make_mcp_handler(tool, "slow_tool")
+        handler = _make_mcp_handler(tool)
         result = await handler({})
 
         assert result.success is False
@@ -133,7 +133,7 @@ class TestMakeMCPHandler:
         tool = StructuredTool(
             name="broken_tool", description="b", args_schema=_AnyArgs, coroutine=_boom
         )
-        handler = _make_mcp_handler(tool, "broken_tool")
+        handler = _make_mcp_handler(tool)
         result = await handler({})
 
         assert result.success is False

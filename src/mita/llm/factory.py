@@ -17,19 +17,29 @@ from mita.llm.providers import API_KEY_PLACEHOLDER, resolve_backend
 
 _logger = logging.getLogger(__name__)
 
-# LangChain phones home to LangSmith when these are set in the ambient environment.
-# Mita promises no telemetry egress; set them off unless the user opted in explicitly.
-os.environ.setdefault("LANGSMITH_TRACING", "false")
-os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
+_SUPPORTED_OLLAMA_OPTIONS = ("num_ctx", "num_gpu", "num_thread")
+"""The Ollama runtime options ChatOllama accepts as constructor keywords."""
 
-# Ollama runtime options ChatOllama cannot express. Dropped with a warning.
-_UNSUPPORTED_OLLAMA_OPTIONS = frozenset(
-    {"num_batch", "use_mmap", "use_mlock", "num_keep", "main_gpu", "low_vram", "flash_attention"}
-)
+
+def _disable_langsmith_telemetry() -> None:
+    """Turn LangSmith tracing off unless the user opted in explicitly.
+
+    LangChain uploads prompts and completions when these variables are set in
+    the ambient environment. Mita promises no telemetry egress.
+    """
+    os.environ.setdefault("LANGSMITH_TRACING", "false")
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
+
+
+_disable_langsmith_telemetry()
 
 
 def build_chat_model(config: MitaConfig) -> BaseChatModel:
-    """Build the chat model for the configured provider."""
+    """Build the chat model for the configured provider.
+
+    A ``base_url`` turns off the automatic stream-usage request in ChatOpenAI, so
+    the model asks for it directly and token counts still stream.
+    """
     backend = resolve_backend(config)
     if backend.is_ollama:
         options = _map_ollama_options(config)
@@ -48,14 +58,16 @@ def build_chat_model(config: MitaConfig) -> BaseChatModel:
         api_key=SecretStr(backend.api_key or API_KEY_PLACEHOLDER),
         temperature=config.model.temperature,
         max_completion_tokens=config.model.max_tokens,
-        # base_url disables ChatOpenAI's automatic stream-usage; request it so
-        # token counts still stream on local OpenAI-compatible backends.
         stream_usage=True,
     )
 
 
 def build_embedding_model(config: MitaConfig) -> Embeddings:
-    """Build the embedding model for the configured provider."""
+    """Build the embedding model for the configured provider.
+
+    Off OpenAI itself, tiktoken length checks post token IDs that a local server
+    cannot read, so ``check_embedding_ctx_length`` stays off.
+    """
     backend = resolve_backend(config)
     if backend.is_ollama:
         return OllamaEmbeddings(model=config.model.embedding, base_url=backend.api_base)
@@ -63,23 +75,24 @@ def build_embedding_model(config: MitaConfig) -> Embeddings:
         model=config.model.embedding,
         base_url=backend.api_base,
         api_key=SecretStr(backend.api_key or API_KEY_PLACEHOLDER),
-        # tiktoken length checks are OpenAI-specific and break local servers;
-        # the library docs say to disable for non-OpenAI providers.
         check_embedding_ctx_length=False,
     )
 
 
 def _map_ollama_options(config: MitaConfig) -> dict[str, int]:
-    """Return the Ollama runtime options ChatOllama supports; warn on the rest."""
+    """Return the Ollama runtime options ChatOllama supports; warn on the rest.
+
+    The unsupported set is derived from the config model, so a new option is
+    either forwarded or reported, never dropped in silence.
+    """
     raw: dict[str, Any] = config.model.ollama_options.to_api_dict()
-    dropped = sorted(set(raw) & _UNSUPPORTED_OLLAMA_OPTIONS)
+    dropped = sorted(set(raw) - set(_SUPPORTED_OLLAMA_OPTIONS))
     if dropped:
         _logger.warning(
             "Ollama options not supported by ChatOllama, ignored: %s", ", ".join(dropped)
         )
-    supported: dict[str, int] = {}
-    for key in ("num_ctx", "num_gpu", "num_thread"):
-        value = raw.get(key)
-        if isinstance(value, int):
-            supported[key] = value
-    return supported
+    return {
+        key: raw[key]
+        for key in _SUPPORTED_OLLAMA_OPTIONS
+        if isinstance(raw.get(key), int) and not isinstance(raw.get(key), bool)
+    }
