@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, TypedDict, cast
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.graph import END, START, StateGraph
 from rich.console import Console
 
@@ -42,6 +42,7 @@ class _AgentState(TypedDict):
     auto_confirm: bool
     console: Console | None
     context_window: int
+    bound_model: Any
     last_tool_sig: str | None
     iteration: int
     stop: bool
@@ -96,6 +97,10 @@ async def run_agent(
 
     context_window = await resolve_context_window(config)
 
+    model = build_chat_model(config)
+    tool_schemas = registry.get_openai_schemas()
+    bound_model: Any = model.bind_tools(tool_schemas) if tool_schemas else model
+
     state: _AgentState = {
         "conversation": conversation,
         "config": config,
@@ -105,22 +110,24 @@ async def run_agent(
         "auto_confirm": auto_confirm,
         "console": console,
         "context_window": context_window,
+        "bound_model": bound_model,
         "last_tool_sig": None,
         "iteration": 0,
         "stop": False,
         "stop_reason": None,
     }
 
+    final_state: Any = state
     try:
         compiled = _build_graph().compile()
-        await cast(Any, compiled).ainvoke(state)
+        final_state = await cast(Any, compiled).ainvoke(state)
     except (KeyboardInterrupt, asyncio.CancelledError):
         sink.error("[Interrupted]")
     except Exception as e:  # noqa: BLE001 - a failing tool must not kill the turn
         _logger.error("Unexpected error in agent loop: %s", e, exc_info=True)
         sink.error(f"Unexpected error: {e}")
 
-    if state["stop_reason"] == "max_iterations":
+    if final_state.get("stop_reason") == "max_iterations":
         sink.error(f"Reached maximum iterations ({config.max_iterations}). Stopping.")
 
     # Fire session_end hooks
@@ -195,10 +202,7 @@ async def _model_node(state: _AgentState) -> dict[str, Any]:
 
     conversation.truncate_to_fit(state["context_window"])
     messages = conversation.get_messages_for_api()
-
-    model = build_chat_model(config)
-    tool_schemas = registry.get_openai_schemas()
-    bound_model: Any = model.bind_tools(tool_schemas) if tool_schemas else model
+    bound_model = state["bound_model"]
 
     assistant_text = ""
     tool_calls_raw: list[dict[str, Any]] = []
@@ -338,15 +342,20 @@ async def _stream_model(
 ) -> tuple[str, list[dict[str, Any]], dict[str, int] | None, float, float | None]:
     """Stream the model response, displaying tokens as they arrive.
 
+    Tool calls are read from the merged ``AIMessageChunk`` so that a batch of
+    calls arriving in one chunk (with ``index`` unset) stays separate — keying
+    on the chunk index collapses them into one (finding: streamed tool-call
+    merge).
+
     Returns:
         Tuple of (text_content, tool_calls_raw, usage, elapsed, ttft).
     """
     text_parts: list[str] = []
-    tool_calls_by_index: dict[int, dict[str, str]] = {}
     usage: dict[str, int] | None = None
     first_token = True
     start_time = time.monotonic()
     ttft: float | None = None
+    accumulated: AIMessageChunk | None = None
 
     spinner_stack = contextlib.ExitStack()
     spinner_stack.enter_context(sink.busy("Thinking..."))
@@ -358,20 +367,12 @@ async def _stream_model(
                 ttft = time.monotonic() - start_time
                 first_token = False
 
+            accumulated = chunk if accumulated is None else accumulated + chunk
+
             text = _content_text(chunk.content)
             if text:
                 text_parts.append(text)
                 sink.stream_token(text)
-
-            for tc in getattr(chunk, "tool_call_chunks", []) or []:
-                idx = tc.get("index", 0)
-                entry = tool_calls_by_index.setdefault(idx, {"id": "", "name": "", "args": ""})
-                if tc.get("id"):
-                    entry["id"] = tc["id"]
-                if tc.get("name"):
-                    entry["name"] += tc["name"]
-                if tc.get("args"):
-                    entry["args"] += tc["args"]
 
             usage = _usage_metadata(chunk) or usage
     finally:
@@ -382,14 +383,7 @@ async def _stream_model(
     if full_text:
         sink.stream_end()
 
-    tool_calls_raw = [
-        {
-            "id": entry["id"] or str(uuid.uuid4()),
-            "type": "function",
-            "function": {"name": entry["name"], "arguments": entry["args"]},
-        }
-        for entry in (tool_calls_by_index[i] for i in sorted(tool_calls_by_index))
-    ]
+    tool_calls_raw = _tool_calls_to_openai(accumulated.tool_calls) if accumulated else []
     return full_text, tool_calls_raw, usage, elapsed, ttft
 
 
@@ -403,7 +397,9 @@ def _tool_calls_to_openai(tool_calls: Sequence[Mapping[str, Any]]) -> list[dict[
                 "type": "function",
                 "function": {
                     "name": call.get("name", ""),
-                    "arguments": json.dumps(call.get("args", {})),
+                    # An empty argument set must become "{}", not "", or the next
+                    # request fails to parse it (finding: empty tool arguments).
+                    "arguments": json.dumps(call.get("args") or {}),
                 },
             }
         )

@@ -79,6 +79,12 @@ class TestToolCallsToOpenai:
         assert result[0]["function"]["name"] == "file_read"
         assert result[0]["function"]["arguments"] == '{"path": "/tmp/x"}'
 
+    def test_empty_args_serialize_to_empty_object(self) -> None:
+        """An empty argument set must become "{}", not "" (finding #4)."""
+        calls = [{"name": "shell", "args": None, "id": "call-1"}]
+        result = _tool_calls_to_openai(calls)  # type: ignore[arg-type]
+        assert result[0]["function"]["arguments"] == "{}"
+
 
 class TestProcessToolCalls:
     def _sink(self, decision: str = "once") -> object:

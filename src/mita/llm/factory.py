@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from langchain_core.embeddings import Embeddings
@@ -15,6 +16,11 @@ from mita.config.schema import MitaConfig
 from mita.llm.providers import API_KEY_PLACEHOLDER, resolve_backend
 
 _logger = logging.getLogger(__name__)
+
+# LangChain phones home to LangSmith when these are set in the ambient environment.
+# Mita promises no telemetry egress; set them off unless the user opted in explicitly.
+os.environ.setdefault("LANGSMITH_TRACING", "false")
+os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
 
 # Ollama runtime options ChatOllama cannot express. Dropped with a warning.
 _UNSUPPORTED_OLLAMA_OPTIONS = frozenset(
@@ -42,6 +48,9 @@ def build_chat_model(config: MitaConfig) -> BaseChatModel:
         api_key=SecretStr(backend.api_key or API_KEY_PLACEHOLDER),
         temperature=config.model.temperature,
         max_completion_tokens=config.model.max_tokens,
+        # base_url disables ChatOpenAI's automatic stream-usage; request it so
+        # token counts still stream on local OpenAI-compatible backends.
+        stream_usage=True,
     )
 
 
@@ -54,6 +63,9 @@ def build_embedding_model(config: MitaConfig) -> Embeddings:
         model=config.model.embedding,
         base_url=backend.api_base,
         api_key=SecretStr(backend.api_key or API_KEY_PLACEHOLDER),
+        # tiktoken length checks are OpenAI-specific and break local servers;
+        # the library docs say to disable for non-OpenAI providers.
+        check_embedding_ctx_length=False,
     )
 
 

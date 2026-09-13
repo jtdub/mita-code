@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
 import re
+from contextlib import AsyncExitStack
 from typing import Any, cast
 
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 from rich.console import Console
 
 from mita.config.schema import PluginDefinition
@@ -17,6 +20,9 @@ from mita.tools.registry import ToolHandler, ToolRegistry
 from mita.tools.schema import ToolDefinition, ToolParameter, ToolResult
 
 _logger = logging.getLogger(__name__)
+
+# Timeout for a single MCP tool call (the old client applied the same bound).
+_MCP_CALL_TIMEOUT = 120.0
 
 _mcp_default_env: Any | None
 try:
@@ -71,11 +77,18 @@ def _schema_to_parameters(input_schema: dict[str, Any]) -> list[ToolParameter]:
 
 
 class PluginManager:
-    """Manages MCP plugin connections and exposes their tools."""
+    """Manages MCP plugin connections and exposes their tools.
+
+    One MCP session is held open per plugin for its lifetime, so a stdio server
+    keeps its process and any in-process state between tool calls. Sessions are
+    closed by ``stop_all()``.
+    """
 
     def __init__(self, plugins: list[PluginDefinition]) -> None:
         self._plugins = plugins
         self._client: MultiServerMCPClient | None = None
+        self._exit_stack: AsyncExitStack | None = None
+        self._sessions: dict[str, Any] = {}
         self._tools: dict[str, list[BaseTool]] = {}
 
     @property
@@ -98,11 +111,12 @@ class PluginManager:
             return []
 
         self._client = MultiServerMCPClient(cast(Any, connections), handle_tool_errors=False)
+        self._exit_stack = AsyncExitStack()
 
         started: list[str] = []
         for name in connections:
             try:
-                self._tools[name] = await self._client.get_tools(server_name=name)
+                await self._connect_plugin(name)
                 started.append(name)
             except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
                 if console:
@@ -112,7 +126,11 @@ class PluginManager:
     async def stop_all(self) -> None:
         """Disconnect all running plugins."""
         self._tools.clear()
+        self._sessions.clear()
         self._client = None
+        if self._exit_stack is not None:
+            await self._exit_stack.aclose()
+            self._exit_stack = None
 
     async def start_plugin(self, name: str, console: Console | None = None) -> bool:
         """Start a single plugin by name."""
@@ -127,7 +145,9 @@ class PluginManager:
             if self._client is None:
                 self._client = MultiServerMCPClient({}, handle_tool_errors=False)
             self._client.connections[name] = cast(Any, connection)
-            self._tools[name] = await self._client.get_tools(server_name=name)
+            if self._exit_stack is None:
+                self._exit_stack = AsyncExitStack()
+            await self._connect_plugin(name)
             return True
         except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
             if console:
@@ -137,6 +157,20 @@ class PluginManager:
     async def stop_plugin(self, name: str) -> None:
         """Stop a single plugin by name."""
         self._tools.pop(name, None)
+        self._sessions.pop(name, None)
+
+    async def _connect_plugin(self, name: str) -> None:
+        """Open a session for one plugin and load its tools bound to that session."""
+        if self._client is None or self._exit_stack is None:
+            raise RuntimeError("start_all() must be called before _connect_plugin()")
+        session = await self._exit_stack.enter_async_context(self._client.session(name))
+        self._sessions[name] = session
+        self._tools[name] = await load_mcp_tools(
+            session,
+            callbacks=self._client.callbacks,
+            server_name=name,
+            handle_tool_errors=False,
+        )
 
     async def list_tools(self, name: str | None = None) -> dict[str, list[dict[str, Any]]]:
         """List tools from connected plugins.
@@ -178,20 +212,23 @@ class PluginManager:
 
     async def test_plugin(self, name: str) -> dict[str, Any]:
         """Test plugin connectivity. Returns status dict."""
-        if name not in self._tools or self._client is None:
+        session = self._sessions.get(name)
+        if session is None:
             return {"name": name, "connected": False, "error": "Not started"}
 
         try:
-            tools = await self._client.get_tools(server_name=name)
-            return {
-                "name": name,
-                "connected": True,
-                "ping": True,
-                "tools": len(tools),
-                "tool_names": [t.name for t in tools],
-            }
+            await session.send_ping()
         except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
             return {"name": name, "connected": True, "ping": False, "error": str(e)}
+
+        tools = self._tools.get(name, [])
+        return {
+            "name": name,
+            "connected": True,
+            "ping": True,
+            "tools": len(tools),
+            "tool_names": [t.name for t in tools],
+        }
 
 
 def _build_connection(plugin: PluginDefinition) -> dict[str, Any]:
@@ -245,6 +282,10 @@ def _tool_schema(tool: BaseTool) -> dict[str, Any]:
     args_schema: Any = tool.args_schema
     if args_schema is None:
         return {}
+    # langchain-mcp-adapters passes the raw JSON-Schema dict through (tools.py),
+    # not a Pydantic model; both shapes must work (finding: dict args_schema).
+    if isinstance(args_schema, dict):
+        return args_schema
     schema: dict[str, Any] = args_schema.model_json_schema()
     return schema
 
@@ -264,7 +305,7 @@ def _make_mcp_handler(tool: BaseTool, remote_tool_name: str) -> ToolHandler:
 
     async def handler(args: dict[str, Any]) -> ToolResult:
         try:
-            raw = await tool.ainvoke(args)
+            raw = await asyncio.wait_for(tool.ainvoke(args), timeout=_MCP_CALL_TIMEOUT)
             return ToolResult(tool_call_id="", success=True, output=_output_text(raw))
         except TimeoutError:
             return ToolResult(

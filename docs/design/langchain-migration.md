@@ -11,11 +11,20 @@ direct `mcp` dependency are gone; `mcp` remains transitive via `langchain-mcp-ad
 >   `isError` result raises and becomes a failed `ToolResult` — identical to the old
 >   behavior.
 > - `ChatOpenAI` in the pinned `langchain-openai` takes `max_completion_tokens` (not
->   `max_tokens`) and `api_key` must be a `SecretStr`.
+>   `max_tokens`), `api_key` must be a `SecretStr`, and `stream_usage=True` is set so
+>   token counts stream on local OpenAI-compatible backends.
+> - `OpenAIEmbeddings` is built with `check_embedding_ctx_length=False` (tiktoken checks
+>   are OpenAI-specific and break local servers).
 > - `ProviderSpec.prefix` (the LiteLLM model string) was removed; `is_ollama` is now a
 >   plain spec field and `ResolvedBackend.model` is gone.
 > - The stdio env allowlist (C1) is retained by passing
 >   `mcp.client.stdio.get_default_environment()` overlaid with the plugin's `env`.
+> - One MCP session is held open per plugin for its lifetime (via an `AsyncExitStack`),
+>   so stdio servers keep their process and state between calls; tool calls carry a
+>   120-second timeout.
+> - Streamed tool calls are read from the merged `AIMessageChunk`, not keyed by chunk
+>   index, so a batch of calls in one chunk stays separate.
+> - LangSmith telemetry is disabled at startup unless the user opted in explicitly.
 
 Replaces two direct dependencies
 (`litellm`, `mcp`) and the hand-rolled agent loop with the LangChain ecosystem

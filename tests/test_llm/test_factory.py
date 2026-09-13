@@ -36,6 +36,7 @@ class TestBuildChatModel:
         assert model.model_name == "qwen2.5-coder:7b"
         assert model.openai_api_base == "http://localhost:8080/v1"
         assert model.openai_api_key.get_secret_value() == "sk-no-key-required"
+        assert model.stream_usage is True
 
     def test_explicit_api_key(self) -> None:
         config = MitaConfig()
@@ -79,6 +80,7 @@ class TestBuildEmbeddingModel:
         assert isinstance(model, OpenAIEmbeddings)
         assert model.model == "nomic-embed-text"
         assert model.openai_api_base == "http://localhost:8080/v1"
+        assert model.check_embedding_ctx_length is False
 
 
 class TestMapOllamaOptions:

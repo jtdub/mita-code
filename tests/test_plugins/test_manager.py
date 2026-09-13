@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.tools import StructuredTool
@@ -51,6 +51,20 @@ def _tool(
     if read_only is not None:
         kwargs["metadata"] = {"readOnlyHint": read_only}
     return StructuredTool(**kwargs)
+
+
+def _mock_client() -> MagicMock:
+    """Return a MultiServerMCPClient mock whose sessions yield mock sessions."""
+    client = AsyncMock()
+
+    def _session_cm(_name: str) -> AsyncMock:
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=AsyncMock())
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    client.session = MagicMock(side_effect=_session_cm)
+    return client
 
 
 class TestSchemaToParameters:
@@ -142,12 +156,18 @@ class TestPluginManager:
     async def test_start_all(self) -> None:
         plugins = [PluginDefinition(name="fs", transport="stdio", command="echo")]
         mgr = PluginManager(plugins)
-        mock_client = AsyncMock()
-        mock_client.get_tools = AsyncMock(return_value=[_tool(name="read", output="x")])
-        with patch("mita.plugins.manager.MultiServerMCPClient", return_value=mock_client):
+        with (
+            patch("mita.plugins.manager.MultiServerMCPClient", return_value=_mock_client()),
+            patch(
+                "mita.plugins.manager.load_mcp_tools",
+                new_callable=AsyncMock,
+                return_value=[_tool(name="read", output="x")],
+            ),
+        ):
             started = await mgr.start_all()
         assert started == ["fs"]
         assert len(mgr._tools["fs"]) == 1
+        assert "fs" in mgr._sessions
 
     @pytest.mark.asyncio
     async def test_start_all_with_failures(self) -> None:
@@ -161,9 +181,14 @@ class TestPluginManager:
     async def test_start_all_tool_load_failure(self) -> None:
         plugins = [PluginDefinition(name="fs", transport="stdio", command="echo")]
         mgr = PluginManager(plugins)
-        mock_client = AsyncMock()
-        mock_client.get_tools = AsyncMock(side_effect=ConnectionError("down"))
-        with patch("mita.plugins.manager.MultiServerMCPClient", return_value=mock_client):
+        with (
+            patch("mita.plugins.manager.MultiServerMCPClient", return_value=_mock_client()),
+            patch(
+                "mita.plugins.manager.load_mcp_tools",
+                new_callable=AsyncMock,
+                side_effect=ConnectionError("down"),
+            ),
+        ):
             started = await mgr.start_all()
         assert started == []
         assert "fs" not in mgr._tools
@@ -172,11 +197,17 @@ class TestPluginManager:
     async def test_stop_all(self) -> None:
         mgr = PluginManager([])
         mgr._tools["test"] = [_tool(name="x")]
-        mgr._client = AsyncMock()
+        mgr._sessions["test"] = AsyncMock()
+        exit_stack = AsyncMock()
+        exit_stack.aclose = AsyncMock()
+        mgr._exit_stack = exit_stack
 
         await mgr.stop_all()
         assert mgr._tools == {}
+        assert mgr._sessions == {}
         assert mgr._client is None
+        assert mgr._exit_stack is None
+        exit_stack.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_list_tools(self) -> None:
@@ -214,6 +245,35 @@ class TestPluginManager:
         assert len(defn.parameters) == 1
 
     @pytest.mark.asyncio
+    async def test_register_tools_dict_args_schema(self) -> None:
+        """langchain-mcp-adapters passes the inputSchema dict through (finding #2)."""
+
+        async def _run(**kwargs: Any) -> str:
+            return "ok"
+
+        dict_tool = StructuredTool(
+            name="read",
+            description="Read",
+            args_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            coroutine=_run,
+        )
+        mgr = PluginManager([])
+        mgr._tools["fs"] = [dict_tool]
+
+        registry = ToolRegistry()
+        count = await mgr.register_tools(registry)
+
+        assert count == 1
+        defn = registry.get_definition("mcp_fs_read")
+        assert defn is not None
+        assert len(defn.parameters) == 1
+        assert defn.parameters[0].name == "path"
+
+    @pytest.mark.asyncio
     async def test_test_plugin_not_started(self) -> None:
         mgr = PluginManager([])
         result = await mgr.test_plugin("missing")
@@ -223,19 +283,22 @@ class TestPluginManager:
     async def test_test_plugin_healthy(self) -> None:
         mgr = PluginManager([])
         mgr._tools["fs"] = [_tool(name="tool1")]
-        mgr._client = AsyncMock()
-        mgr._client.get_tools = AsyncMock(return_value=[_tool(name="tool1")])
+        session = AsyncMock()
+        session.send_ping = AsyncMock(return_value=None)
+        mgr._sessions["fs"] = session
 
         result = await mgr.test_plugin("fs")
         assert result["ping"] is True
         assert result["tools"] == 1
+        session.send_ping.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_test_plugin_ping_failed(self) -> None:
         mgr = PluginManager([])
         mgr._tools["fs"] = [_tool(name="tool1")]
-        mgr._client = AsyncMock()
-        mgr._client.get_tools = AsyncMock(side_effect=ConnectionError("down"))
+        session = AsyncMock()
+        session.send_ping = AsyncMock(side_effect=ConnectionError("down"))
+        mgr._sessions["fs"] = session
 
         result = await mgr.test_plugin("fs")
         assert result["ping"] is False
@@ -244,12 +307,18 @@ class TestPluginManager:
     async def test_start_plugin(self) -> None:
         plugin = PluginDefinition(name="test", transport="stdio", command="echo")
         mgr = PluginManager([plugin])
-        mock_client = AsyncMock()
-        mock_client.get_tools = AsyncMock(return_value=[_tool(name="x")])
-        with patch("mita.plugins.manager.MultiServerMCPClient", return_value=mock_client):
+        with (
+            patch("mita.plugins.manager.MultiServerMCPClient", return_value=_mock_client()),
+            patch(
+                "mita.plugins.manager.load_mcp_tools",
+                new_callable=AsyncMock,
+                return_value=[_tool(name="x")],
+            ),
+        ):
             result = await mgr.start_plugin("test")
         assert result is True
         assert "test" in mgr._tools
+        assert "test" in mgr._sessions
 
     @pytest.mark.asyncio
     async def test_start_plugin_not_configured(self) -> None:
@@ -261,9 +330,11 @@ class TestPluginManager:
     async def test_stop_plugin(self) -> None:
         mgr = PluginManager([])
         mgr._tools["test"] = [_tool(name="x")]
+        mgr._sessions["test"] = AsyncMock()
 
         await mgr.stop_plugin("test")
         assert "test" not in mgr._tools
+        assert "test" not in mgr._sessions
 
     @pytest.mark.asyncio
     async def test_tool_execution_via_registry(self) -> None:

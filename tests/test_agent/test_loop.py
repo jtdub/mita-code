@@ -138,6 +138,33 @@ class TestRunAgent:
         assert len(tool_msgs) == 1
 
     @pytest.mark.asyncio()
+    async def test_streaming_multiple_tool_calls_in_one_chunk(self) -> None:
+        """Two tool calls in one chunk (index unset) must stay separate (finding #1)."""
+        config = _config()
+        config.ui.stream = True
+        console = MagicMock()
+
+        model = _fake_model(
+            stream_chunks=[
+                AIMessageChunk(
+                    content="",
+                    tool_calls=[
+                        {"name": "file_read", "args": {"path": "/tmp/none"}, "id": "call-1"},
+                        {"name": "file_read", "args": {"path": "/tmp/none2"}, "id": "call-2"},
+                    ],
+                )
+            ]
+        )
+        with patch("mita.agent.loop.build_chat_model", return_value=model):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("read two", config, console, conversation=conv)
+
+        tool_msgs = [m for m in result.messages if m.role == Role.TOOL]
+        assert len(tool_msgs) == 2
+        assert {m.tool_call_id for m in tool_msgs} == {"call-1", "call-2"}
+
+    @pytest.mark.asyncio()
     async def test_text_json_fallback(self) -> None:
         config = _config()
         console = MagicMock()
@@ -158,9 +185,12 @@ class TestRunAgent:
 
     @pytest.mark.asyncio()
     async def test_max_iterations_reached(self) -> None:
+        from mita.ui.sink import RecordingSink
+
         config = _config()
         config.max_iterations = 1
         console = MagicMock()
+        sink = RecordingSink()
 
         model = _fake_model(
             ainvoke_side_effect=[
@@ -175,11 +205,15 @@ class TestRunAgent:
         with patch("mita.agent.loop.build_chat_model", return_value=model):
             conv = Conversation()
             conv.add(Message(role=Role.SYSTEM, content="system"))
-            result = await run_agent("test", config, console, conversation=conv)
+            result = await run_agent("test", config, console, conversation=conv, sink=sink)
 
         assert isinstance(result, Conversation)
         tool_msgs = [m for m in result.messages if m.role == Role.TOOL]
         assert len(tool_msgs) == 1
+        assert any(
+            kind == "error" and "maximum iterations" in str(message)
+            for kind, message in sink.events
+        )
 
     @pytest.mark.asyncio()
     async def test_repeated_tool_calls_detected(self) -> None:
