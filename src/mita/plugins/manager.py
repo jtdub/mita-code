@@ -24,6 +24,9 @@ _logger = logging.getLogger(__name__)
 _MCP_CALL_TIMEOUT = 120.0
 """Seconds a single MCP tool call may take before it is abandoned."""
 
+_MCP_PING_TIMEOUT = 10.0
+"""Seconds a plugin health-check ping may take before it is abandoned."""
+
 _ENV_ALLOWLIST: frozenset[str] = frozenset(
     {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR", "PATHEXT"}
 )
@@ -80,13 +83,13 @@ class PluginManager:
 
     One MCP session is held open per plugin for its lifetime, so a stdio server
     keeps its process and any in-process state between tool calls. Sessions are
-    closed by ``stop_all()``.
+    closed by ``stop_all()`` and ``stop_plugin()``.
     """
 
     def __init__(self, plugins: list[PluginDefinition]) -> None:
         self._plugins = plugins
         self._client: MultiServerMCPClient | None = None
-        self._exit_stack: AsyncExitStack | None = None
+        self._exit_stacks: dict[str, AsyncExitStack] = {}
         self._sessions: dict[str, Any] = {}
         self._tools: dict[str, list[BaseTool]] = {}
 
@@ -106,13 +109,21 @@ class PluginManager:
         return started
 
     async def stop_all(self) -> None:
-        """Disconnect all running plugins."""
+        """Disconnect all running plugins.
+
+        A failing close must not mask the error a caller was propagating, so each
+        plugin's session is closed in its own guarded block.
+        """
         self._tools.clear()
         self._sessions.clear()
         self._client = None
-        if self._exit_stack is not None:
-            await self._exit_stack.aclose()
-            self._exit_stack = None
+        stacks = self._exit_stacks
+        self._exit_stacks = {}
+        for name, stack in stacks.items():
+            try:
+                await stack.aclose()
+            except Exception:  # noqa: BLE001 - cleanup must not mask the original error
+                _logger.warning("Error closing plugin '%s' session", name, exc_info=True)
 
     async def start_plugin(self, name: str, console: Console | None = None) -> bool:
         """Start a single plugin by name."""
@@ -127,11 +138,12 @@ class PluginManager:
             if self._client is None:
                 self._client = MultiServerMCPClient({}, handle_tool_errors=False)
             self._client.connections[name] = cast(Any, connection)
-            if self._exit_stack is None:
-                self._exit_stack = AsyncExitStack()
             await self._connect_plugin(name)
             return True
         except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
+            # A failed start must not leave a connection with no session.
+            if self._client is not None:
+                self._client.connections.pop(name, None)
             if console:
                 console.print(f"[yellow]Plugin '{name}' failed to start: {e}[/yellow]")
             return False
@@ -140,13 +152,21 @@ class PluginManager:
         """Stop a single plugin by name."""
         self._tools.pop(name, None)
         self._sessions.pop(name, None)
+        stack = self._exit_stacks.pop(name, None)
+        if stack is not None:
+            try:
+                await stack.aclose()
+            except Exception:  # noqa: BLE001 - cleanup must not mask the original error
+                _logger.warning("Error closing plugin '%s' session", name, exc_info=True)
 
     async def _connect_plugin(self, name: str) -> None:
         """Open a session for one plugin and load its tools bound to that session."""
-        if self._client is None or self._exit_stack is None:
-            raise RuntimeError("start_all() must be called before _connect_plugin()")
-        session = await self._exit_stack.enter_async_context(self._client.session(name))
+        if self._client is None:
+            raise RuntimeError("a client must exist before connecting a plugin")
+        stack = AsyncExitStack()
+        session = await stack.enter_async_context(self._client.session(name))
         self._sessions[name] = session
+        self._exit_stacks[name] = stack
         self._tools[name] = await load_mcp_tools(
             session,
             callbacks=self._client.callbacks,
@@ -195,7 +215,7 @@ class PluginManager:
             return {"name": name, "connected": False, "error": "Not started"}
 
         try:
-            await session.send_ping()
+            await asyncio.wait_for(session.send_ping(), timeout=_MCP_PING_TIMEOUT)
         except Exception as e:  # noqa: BLE001 - untrusted plugin boundary
             return {"name": name, "connected": True, "ping": False, "error": str(e)}
 
@@ -307,13 +327,29 @@ def _make_mcp_handler(tool: BaseTool) -> ToolHandler:
 
 
 def _output_text(raw: Any) -> str:
-    """Convert a LangChain tool result (content or content/artifact tuple) to text."""
+    """Convert a LangChain tool result (content or content/artifact tuple) to text.
+
+    A block without text (an image, a resource link) becomes a marker so the
+    agent still sees that the tool produced output.
+    """
     if isinstance(raw, tuple):
         raw = raw[0]
     if isinstance(raw, str):
         return raw
     if isinstance(raw, list):
-        parts = [block.get("text", "") for block in raw if isinstance(block, dict)]
-        if parts:
-            return "\n".join(parts)
+        parts: list[str] = []
+        for block in raw:
+            if not isinstance(block, dict):
+                parts.append(str(block))
+                continue
+            text = block.get("text")
+            if text:
+                parts.append(text)
+            elif block.get("type") == "base64":
+                parts.append(f"[binary data: {block.get('mime_type', 'unknown')}]")
+            elif block.get("type") == "url":
+                parts.append(f"[resource: {block.get('url', '')}]")
+            else:
+                parts.append(str(block))
+        return "\n".join(parts) if parts else str(raw)
     return str(raw)

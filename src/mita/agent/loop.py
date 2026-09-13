@@ -283,10 +283,14 @@ async def _model_node(state: _AgentState) -> dict[str, Any]:
         )
     )
 
+    # Only report exhaustion when the turn still wanted to continue. A plain
+    # answer on the last allowed iteration is a normal end, not a stop.
+    at_limit = iteration >= config.max_iterations
+    stop_reason = "max_iterations" if at_limit and tool_calls_raw else None
     return {
         "last_tool_sig": signature or state["last_tool_sig"],
         "iteration": iteration,
-        "stop_reason": "max_iterations" if iteration >= config.max_iterations else None,
+        "stop_reason": stop_reason,
     }
 
 

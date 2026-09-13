@@ -216,6 +216,28 @@ class TestRunAgent:
         )
 
     @pytest.mark.asyncio()
+    async def test_max_iterations_plain_answer_no_message(self) -> None:
+        """A plain answer on the last allowed iteration is a normal end."""
+        from mita.ui.sink import RecordingSink
+
+        config = _config()
+        config.max_iterations = 1
+        console = MagicMock()
+        sink = RecordingSink()
+
+        with patch("mita.agent.loop.build_chat_model", return_value=_fake_model()):
+            conv = Conversation()
+            conv.add(Message(role=Role.SYSTEM, content="system"))
+            result = await run_agent("test", config, console, conversation=conv, sink=sink)
+
+        assistant_msgs = [m for m in result.messages if m.role == Role.ASSISTANT]
+        assert len(assistant_msgs) == 1
+        assert not any(
+            kind == "error" and "maximum iterations" in str(message)
+            for kind, message in sink.events
+        )
+
+    @pytest.mark.asyncio()
     async def test_repeated_tool_calls_detected(self) -> None:
         config = _config()
         config.max_iterations = 5

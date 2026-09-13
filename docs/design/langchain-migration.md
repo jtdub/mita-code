@@ -25,6 +25,12 @@ direct `mcp` dependency are gone; `mcp` remains transitive via `langchain-mcp-ad
 > - Streamed tool calls are read from the merged `AIMessageChunk`, not keyed by chunk
 >   index, so a batch of calls in one chunk stays separate.
 > - LangSmith telemetry is disabled at startup unless the user opted in explicitly.
+>
+> **C1 scope note:** the env allowlist (C1) covers which variables a plugin subprocess
+> *inherits*. langchain-mcp-adapters additionally expands `${VAR}` in configured env
+> *values* from the host environment, so a trusted config can pass any host secret to a
+> plugin that way. This grants no escalation: `plugins` is trust-gated, and a trusted
+> config can already set an arbitrary command.
 
 Replaces two direct dependencies
 (`litellm`, `mcp`) and the hand-rolled agent loop with the LangChain ecosystem

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +14,7 @@ from mita.config.schema import PluginDefinition
 from mita.plugins.manager import (
     PluginManager,
     _make_mcp_handler,
+    _output_text,
     _schema_to_parameters,
     mcp_tool_name,
 )
@@ -140,6 +142,20 @@ class TestMakeMCPHandler:
         assert "failed" in (result.error or "")
 
 
+class TestOutputText:
+    def test_binary_data_marker(self) -> None:
+        raw = [{"type": "base64", "mime_type": "image/png"}]
+        assert _output_text(raw) == "[binary data: image/png]"
+
+    def test_resource_link_marker(self) -> None:
+        raw = [{"type": "url", "url": "file:///x"}]
+        assert _output_text(raw) == "[resource: file:///x]"
+
+    def test_mixed_blocks(self) -> None:
+        raw = [{"text": "here"}, {"type": "base64", "mime_type": "image/png"}]
+        assert _output_text(raw) == "here\n[binary data: image/png]"
+
+
 class TestPluginManager:
     @pytest.fixture
     def plugins(self) -> list[PluginDefinition]:
@@ -200,13 +216,28 @@ class TestPluginManager:
         mgr._sessions["test"] = AsyncMock()
         exit_stack = AsyncMock()
         exit_stack.aclose = AsyncMock()
-        mgr._exit_stack = exit_stack
+        mgr._exit_stacks["test"] = exit_stack
 
         await mgr.stop_all()
         assert mgr._tools == {}
         assert mgr._sessions == {}
         assert mgr._client is None
-        assert mgr._exit_stack is None
+        assert mgr._exit_stacks == {}
+        exit_stack.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_plugin_closes_session(self) -> None:
+        mgr = PluginManager([])
+        mgr._tools["test"] = [_tool(name="x")]
+        mgr._sessions["test"] = AsyncMock()
+        exit_stack = AsyncMock()
+        exit_stack.aclose = AsyncMock()
+        mgr._exit_stacks["test"] = exit_stack
+
+        await mgr.stop_plugin("test")
+        assert "test" not in mgr._tools
+        assert "test" not in mgr._sessions
+        assert mgr._exit_stacks == {}
         exit_stack.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -302,6 +333,42 @@ class TestPluginManager:
 
         result = await mgr.test_plugin("fs")
         assert result["ping"] is False
+
+    @pytest.mark.asyncio
+    async def test_test_plugin_ping_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import mita.plugins.manager as pm
+
+        monkeypatch.setattr(pm, "_MCP_PING_TIMEOUT", 0.01)
+        mgr = PluginManager([])
+        mgr._tools["fs"] = [_tool(name="tool1")]
+        session = AsyncMock()
+
+        async def _slow() -> None:
+            await asyncio.sleep(1)
+
+        session.send_ping = _slow
+        mgr._sessions["fs"] = session
+
+        result = await mgr.test_plugin("fs")
+        assert result["ping"] is False
+
+    @pytest.mark.asyncio
+    async def test_start_plugin_failure_rolls_back_connection(self) -> None:
+        plugin = PluginDefinition(name="test", transport="stdio", command="echo")
+        mgr = PluginManager([plugin])
+        mock_client = _mock_client()
+        mock_client.connections = {}
+        with (
+            patch("mita.plugins.manager.MultiServerMCPClient", return_value=mock_client),
+            patch(
+                "mita.plugins.manager.load_mcp_tools",
+                new_callable=AsyncMock,
+                side_effect=ConnectionError("down"),
+            ),
+        ):
+            result = await mgr.start_plugin("test")
+        assert result is False
+        assert "test" not in mock_client.connections
 
     @pytest.mark.asyncio
     async def test_start_plugin(self) -> None:

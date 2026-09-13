@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
-import pytest
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
@@ -55,15 +52,36 @@ class TestBuildChatModel:
         assert model.num_thread == 8
         assert model.num_ctx == 8192
 
-    def test_unsupported_ollama_options_dropped(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_unsupported_ollama_options_forwarded(self) -> None:
         config = MitaConfig()
         config.model.ollama_options.use_mmap = True
         config.model.ollama_options.low_vram = True
-        with caplog.at_level(logging.WARNING):
-            model = build_chat_model(config)
-        assert isinstance(model, ChatOllama)
-        assert "use_mmap" in caplog.text
-        assert "low_vram" in caplog.text
+        config.model.ollama_options.num_gpu = 1
+        model = build_chat_model(config)
+        options = getattr(model, "kwargs", {}).get("options", {})
+        assert options["use_mmap"] is True
+        assert options["low_vram"] is True
+        assert options["num_gpu"] == 1
+        assert options["temperature"] == 0.1
+        assert options["num_predict"] == 4096
+
+    def test_openai_compatible_sends_max_tokens_via_extra_body(self) -> None:
+        config = MitaConfig()
+        config.llm.provider = LLMProvider.LLAMACPP
+        model = build_chat_model(config)
+        assert isinstance(model, ChatOpenAI)
+        # ChatOpenAI rewrites the max_tokens field to max_completion_tokens, so
+        # the cap must ride in extra_body to reach local servers verbatim.
+        assert model.extra_body == {"max_tokens": 4096}
+        assert model.max_tokens is None
+
+    def test_stream_usage_follows_show_token_count(self) -> None:
+        config = MitaConfig()
+        config.llm.provider = LLMProvider.LLAMACPP
+        config.ui.show_token_count = False
+        model = build_chat_model(config)
+        assert isinstance(model, ChatOpenAI)
+        assert model.stream_usage is False
 
 
 class TestBuildEmbeddingModel:
